@@ -11,6 +11,7 @@ from ..tasks.inbox import Inbox
 from ..tasks.journal import Journal
 from ..tasks.models import Status, Task
 from ..tasks.store import Store
+from . import guardrails
 from .guards import Guard
 from .prompts import NO_TOOL_NUDGE, SUPERVISOR_WARNING, system_prompt
 from .tools import BROWSER_TOOLS, TOOLS, Browser
@@ -112,6 +113,11 @@ class Runner:
                 messages.append({"role": "user", "content": NO_TOOL_NUDGE})
 
     async def _browse(self, task: Task, browser: Browser, guard: Guard, name: str, args: dict) -> str:
+        if name == "fill":
+            reason = await guardrails.check_fill(browser.page, args.get("label", ""), args.get("value", ""))
+            if reason:
+                self.journal.log(task.id, "guard", f"blocked fill: {reason}")
+                return f"BLOCKED: {reason}"
         try:
             output = await browser.run(name, args)
         except Exception as e:
