@@ -25,6 +25,7 @@ and they can only reach the caller by calling back, so get the important details
 
 Ask a follow-up only for details the task clearly needs and the caller hasn't given, for example:
 - bookings: from where, to where, which day, how many people, the name to book under
+- doctor appointments: what the visit is for, which days or times work, the patient's full name and date of birth
 - shopping: which item, size or quantity, budget
 Speech-to-text makes mistakes. If a place name or number sounds garbled, ask them to repeat it.
 Don't ask about things that don't matter. If the caller wants you to just pick, that's fine.
