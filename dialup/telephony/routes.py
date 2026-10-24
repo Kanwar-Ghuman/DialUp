@@ -91,7 +91,7 @@ async def conversation_relay(ws: WebSocket):
                 # A keypress answers a question too ("press 1 to confirm"). Ignored on other calls.
                 reply = _handle_speech(s, ctx, str(msg.get("digit", "")).strip())
                 await _say(ws, reply)
-                await _hang_up(ws, 4)
+                await _hang_up(ws, _speech_seconds(reply))
                 break
             elif kind == "error":
                 print(f"[call]   relay error: {msg}", flush=True)

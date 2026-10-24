@@ -145,7 +145,8 @@ class Runner:
             verdict = guard.check()
             if verdict.action == "stop":
                 self.journal.log(task.id, "guard", f"stopped: {verdict.reason}")
-                return Status.STOPPED, say.stopped.format(reason=verdict.reason)
+                summary = await self._stop_summary(task, system, messages, results, verdict.reason)
+                return Status.STOPPED, summary or say.stopped.format(reason=verdict.reason)
 
             if results:
                 if verdict.action == "warn":
@@ -154,6 +155,26 @@ class Runner:
                 messages.append({"role": "user", "content": results})
             else:
                 messages.append({"role": "user", "content": NO_TOOL_NUDGE})
+
+    async def _stop_summary(self, task: Task, system: str, messages: list[dict],
+                            results: list[dict], reason: str) -> str:
+        """The guard stopped the run. One last model call, no tools, to tell the caller
+        what was found before stopping. The budget check already reserved room for it.
+        Returns "" on any problem, and the caller gets the standard stop phrase instead."""
+        p = phrases(task.language)
+        ask = (f"Supervisor: you have been stopped because you {reason}. Don't call any tools. "
+               f"In {p.name}, in at most 40 words of plain sentences, tell the caller what you found "
+               f"so far and that you had to stop. Say prices in words, like \"{p.price_example}\".")
+        content = results + [{"type": "text", "text": ask}] if results else ask
+        try:
+            reply = await asyncio.wait_for(self.llm.messages.create(
+                model=self.settings.model, max_tokens=300, system=system, tools=TOOLS,
+                tool_choice={"type": "none"}, messages=messages + [{"role": "user", "content": content}],
+            ), timeout=30)
+        except Exception as e:
+            self.journal.log(task.id, "error", f"stop summary failed: {type(e).__name__}")
+            return ""
+        return " ".join(b.text for b in reply.content if getattr(b, "type", "") == "text").strip()
 
     async def _browse(self, task: Task, browser: Browser, guard: Guard, name: str, args: dict) -> str:
         if name == "fill":
