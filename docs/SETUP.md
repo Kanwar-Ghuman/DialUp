@@ -1,6 +1,6 @@
 # Setup
 
-This takes about 30 minutes. Do steps 1 to 6 before building starts at 2:00 PM.
+This takes about 30 minutes.
 
 ## What you need
 
@@ -23,7 +23,14 @@ playwright install chromium
 python scripts/smoke_test.py
 ```
 
-The test starts the real server and drives it the way Twilio would, with a scripted model instead of Claude. It runs a voice booking, an SMS booking, an impossible task, and a stuck agent. It ends with `All checks passed.` It uses no API keys and costs nothing.
+The test starts the real server and drives it the way Twilio would, with a scripted model instead of Claude and a fake caller. It covers voice and SMS bookings, intake follow-up questions, confirming by keypad, a booking blocked without the caller's yes, an impossible task, a stuck agent, a busy question call, Chinese, and the clinic site. It ends with `All checks passed.` It uses no API keys and costs nothing.
+
+Once you have an Anthropic key (step 5), you can also run the real agent with your terminal as the phone, no Twilio needed:
+
+```bash
+python scripts/try_agent.py "Book me a flu shot at the clinic this week, in the morning"
+python scripts/try_agent.py --budget 0.03 "..."   # watch the supervisor stop it
+```
 
 ## 2. Create a Twilio account and buy a number
 
@@ -99,11 +106,12 @@ Dial-Up ready
 Open http://localhost:8000/live on your laptop. Every step shows up there.
 
 1. **Inbound call.** Call your number. You hear the language menu. Press 1, then you hear "Hi, this is Dial-Up."
-2. **Full task.** Say "Find me the cheapest bus from San Diego to Los Angeles tomorrow and hold a seat," then hang up. Steps appear in the live view.
-3. **Question call.** Your phone rings: "What name should the seat be under?" Say your name.
-4. **Result call.** Your phone rings with the seat, price and code.
+2. **Full task.** Say "Book me a flu shot at the clinic this week, in the morning." Answer its follow-up questions (name, date of birth). It reads the task back and hangs up. Steps appear in the live view.
+3. **Confirm call.** Your phone rings with the appointment it found: "Say yes or press 1." Press 1.
+4. **Result call.** Your phone rings with the day, time and confirmation number.
 5. **SMS.** Text the same request to the number. Reply to the question by text.
 6. **Impossible task.** Ask for "a bus to the moon." You get a callback explaining why not.
+6b. **Real web.** Ask something factual, like when a nearby store closes today. The live view shows it searching and reading a real page.
 7. **Chinese.** Call, press 2, and ask in Chinese. See "Languages" below.
 
 ## 11. Before demos: lock it down (optional)
@@ -139,7 +147,7 @@ To skip the menu, set `LANGUAGES=en` or `LANGUAGES=zh`.
 
 Twilio's docs don't list every language code each speech provider accepts, so test Chinese as soon as English works:
 
-1. Call, press 2, and say: "帮我找明天从圣地亚哥到洛杉矶最便宜的巴士，并帮我订一个座位".
+1. Call, press 2, and say: "帮我在社区诊所约一个这周上午的流感疫苗。" Confirm with "是的" or press 1.
 2. Check that you hear the Chinese greeting and confirmation.
 3. Check the live view: the task shows 中文, and the steps appear.
 
