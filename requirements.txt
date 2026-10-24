@@ -7,3 +7,4 @@ anthropic
 playwright
 httpx
 websockets
+pytest
