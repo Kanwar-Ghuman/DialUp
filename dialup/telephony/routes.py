@@ -58,9 +58,19 @@ async def conversation_relay(ws: WebSocket):
     s = services(ws)
     ctx: dict[str, str] = {}
     turns: list[str] = []  # what the caller said so far on an intake call
+    heard: list[str] = []  # pieces of the current answer; people pause mid-sentence
     timer: asyncio.Task | None = None
     try:
-        async for raw in ws.iter_text():
+        while True:
+            try:
+                raw = await (asyncio.wait_for(ws.receive_text(), s.settings.speech_pause)
+                             if heard else ws.receive_text())
+            except asyncio.TimeoutError:  # caller went quiet: treat what we heard as one answer
+                said = " ".join(heard)
+                heard.clear()
+                if await _respond(ws, s, ctx, turns, said):
+                    break
+                continue
             msg = json.loads(raw)
             kind = msg.get("type")
             if kind == "setup":
@@ -72,32 +82,48 @@ async def conversation_relay(ws: WebSocket):
                     timer = asyncio.create_task(_hang_up(ws, s.settings.result_hold))
             elif kind == "prompt":
                 said = msg.get("voicePrompt", "").strip()
-                if not said:
-                    continue
-                if ctx.get("mode") == "intake":
-                    turns.append(said)
-                    lang = ctx.get("lang") or s.settings.default_language
-                    question, task_text = await clarify(s.runner.llm, s.settings.model, lang, turns)
-                    if question:
-                        await _say(ws, question)
-                        continue
-                    reply = _start_task(s, ctx, turns, task_text)
-                else:
-                    reply = _handle_speech(s, ctx, said)
-                await _say(ws, reply)
-                await _hang_up(ws, _speech_seconds(reply))
-                break
+                if said:
+                    heard.append(said)
             elif kind == "error":
                 print(f"[call]   relay error: {msg}", flush=True)
     except WebSocketDisconnect:
-        pass
+        _handle_hangup(s, ctx, turns, " ".join(heard))
     finally:
         if timer:
             timer.cancel()
 
 
+async def _respond(ws: WebSocket, s: Services, ctx: dict[str, str], turns: list[str], said: str) -> bool:
+    """Reply to one full answer. Returns True once the call is over."""
+    if ctx.get("mode") == "intake":
+        turns.append(said)
+        lang = ctx.get("lang") or s.settings.default_language
+        question, task_text = await clarify(s.runner.llm, s.settings.model, lang, turns)
+        if question:
+            await _say(ws, question)
+            return False
+        reply = _start_task(s, ctx, turns, task_text)
+    else:
+        reply = _handle_speech(s, ctx, said)
+    await _say(ws, reply)
+    await _hang_up(ws, _speech_seconds(reply))
+    return True
+
+
+def _handle_hangup(s: Services, ctx: dict[str, str], turns: list[str], said: str) -> None:
+    """The caller hung up mid-conversation. Still use what they said."""
+    mode = ctx.get("mode")
+    if mode == "intake" and not ctx.get("started"):
+        heard = [*turns, said] if said else turns
+        if heard:
+            _start_task(s, ctx, heard, " ".join(heard))
+    elif mode == "ask" and said:
+        _handle_speech(s, ctx, said)
+
+
 def _start_task(s: Services, ctx: dict[str, str], turns: list[str], task_text: str) -> str:
     lang = ctx.get("lang") or s.settings.default_language
+    ctx["started"] = "1"
     task = s.store.create_task(ctx["caller"], task_text, Channel.VOICE, lang)
     s.journal.log(task.id, "intake", f"({lang}) {' / '.join(turns)}")
     s.runner.start(task.id)

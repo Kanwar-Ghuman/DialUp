@@ -142,21 +142,28 @@ class ScriptedLLM:
 
 # ---------- Fake Twilio + fake caller ----------
 
-async def relay_call(params: dict, *speech: str) -> list[dict]:
+async def relay_call(params: dict, *speech: str | tuple[str, ...]) -> list[dict]:
     """Act like Twilio ConversationRelay: setup, then the caller says each line after the
-    server speaks. Collects everything the server says until it hangs up."""
+    server speaks. A tuple is one answer said in pieces, with short pauses between them.
+    Collects everything the server says until it hangs up."""
     received = []
     lines = list(speech)
+
+    async def say(ws, line):
+        for piece in (line if isinstance(line, tuple) else (line,)):
+            await ws.send(json.dumps({"type": "prompt", "voicePrompt": piece, "last": True}))
+            await asyncio.sleep(0.1)
+
     async with websockets.connect(f"ws://127.0.0.1:{PORT}/ws") as ws:
         await ws.send(json.dumps({"type": "setup", "callSid": "CAtest", "customParameters": params}))
-        await ws.send(json.dumps({"type": "prompt", "voicePrompt": lines.pop(0), "last": True}))
+        await say(ws, lines.pop(0))
         async for raw in ws:
             msg = json.loads(raw)
             received.append(msg)
             if msg["type"] == "end":
                 break
             if msg["type"] == "text" and lines:
-                await ws.send(json.dumps({"type": "prompt", "voicePrompt": lines.pop(0), "last": True}))
+                await say(ws, lines.pop(0))
     return received
 
 
@@ -228,6 +235,7 @@ async def main():
         public_host=f"127.0.0.1:{PORT}", site_base=BASE, model="scripted",
         max_steps=25, max_minutes=5, token_budget=400_000, ask_timeout=30, result_hold=1,
         max_concurrent=3, callback_retries=1, validate_twilio=False, db_path=db,
+        speech_pause=0.5,
     )
     caller = FakeCaller()
     llm = ScriptedLLM()
@@ -332,6 +340,16 @@ async def main():
     check("then hears the task read back", "San Diego" in texts[-1] and "call you back" in texts[-1], texts[-1])
     t = await wait_for(store, caller, newest_id())
     check("task has details from both answers", "Vague" in t.goal and "Kanwar" in t.goal, t.goal)
+
+    print("\n8b. Caller pauses mid-sentence")
+    before = len(store.recent(100))
+    said = await relay_call({"mode": "intake", "caller": CALLER},
+                            ("Find the cheapest bus from San Diego", "to Los Angeles", "and hold a seat"))
+    texts = [m.get("token", "") for m in said if m["type"] == "text"]
+    check("one reply for the whole sentence", len(texts) == 1, str(texts))
+    t = await wait_for(store, caller, newest_id())
+    check("one task with every piece", len(store.recent(100)) == before + 1
+          and "San Diego to Los Angeles and hold a seat" in t.goal, t.goal)
 
     print("\n9. Question call is busy")
     started = asyncio.get_running_loop().time()

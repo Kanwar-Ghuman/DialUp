@@ -8,6 +8,27 @@ With Dial-Up, you call a number, say what you need done, and hang up. An AI agen
 
 No app, no screen, no data plan. Any phone, in English or Chinese.
 
+## Format
+
+Judging happens in two rounds:
+
+1. **Video (everyone).** Judges watch a recorded video and pick the top 5 teams.
+2. **Live pitch (top 5).** Run the live demo below.
+
+The video is what gets you to the second round, so record it first and make it great.
+
+## Video
+
+Use one take per part and cut them together. Screen-record the live view, with the phone on speaker so the mic picks up both sides of every call. `CALL_DELAY` in `.env` waits 8 seconds before each callback. Use that gap to narrate over the live view, then cut it down in editing if it drags.
+
+1. **Hook (10 seconds):** the first line of the pitch over a shot of a basic phone.
+2. **English bus booking:** part 1 below, end to end. Show the follow-up question on the first call, the confirm callback, and the result with the code.
+3. **Real website (20 seconds):** call and ask something factual, like "What time does the Apple Store at UTC in San Diego close today?" Show the agent searching and reading the real site in the live view.
+4. **Chinese (30 seconds):** part 2 below. Speed up the waiting parts.
+5. **Close (10 seconds):** "No app, no screen, no data plan. Any phone."
+
+Record each part twice, and keep the best take.
+
 ## Live demo (3 minutes)
 
 **Before you start:** server running, http://localhost:8000/live full screen on the projector, phone volume up and on speaker. Ideally a teammate who speaks Mandarin does part 2.
@@ -37,7 +58,7 @@ Call and ask for a bus to the moon. Let it call back with the reason. If time is
 
 Things that can break live: venue wifi, ngrok, Twilio, phone signal.
 
-- **Record both demos** once they work: screen-record the live view with phone audio on speaker.
+- **The video doubles as the backup.** If a live call fails, play that part of the video.
 - **Hotspot.** If venue wifi is slow, run the laptop off a phone hotspot.
 - **Test 10 minutes before demos.** One English call and one Chinese call. If either fails, play its video.
 - **Old tasks stay in the live view** after a restart (SQLite), so past successful runs are always there to show.

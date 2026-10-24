@@ -47,6 +47,7 @@ class TwilioNotifier:
         }
         if status_url:
             kwargs.update(status_callback=status_url, status_callback_method="POST")
+        await asyncio.sleep(self.settings.call_delay)
         await asyncio.to_thread(self.client.calls.create, **kwargs)
 
     async def _text(self, to: str, body: str) -> None:

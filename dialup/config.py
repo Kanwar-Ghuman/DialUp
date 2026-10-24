@@ -68,6 +68,8 @@ class Settings:
     cost_budget: float = 0.50   # guard: USD per task, stops before crossing it (0 = off)
     price_in: float = 2.0       # USD per million input tokens (Sonnet 5.5)
     price_out: float = 10.0     # USD per million output tokens (Sonnet 5.5)
+    speech_pause: float = 2.0   # seconds of silence before the caller counts as done talking
+    call_delay: float = 0.0     # seconds to wait before each outbound call (pacing for demos)
 
     @property
     def public_url(self) -> str:
@@ -106,4 +108,6 @@ def load_settings() -> Settings:
         cost_budget=float(os.getenv("COST_BUDGET", "0.50")),
         price_in=float(os.getenv("PRICE_IN", "2.0")),
         price_out=float(os.getenv("PRICE_OUT", "10.0")),
+        speech_pause=float(os.getenv("SPEECH_PAUSE", "2.0")),
+        call_delay=float(os.getenv("CALL_DELAY", "0")),
     )
