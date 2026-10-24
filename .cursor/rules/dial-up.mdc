@@ -6,7 +6,7 @@ alwaysApply: true
 
 # Dial-Up
 
-Dial-Up lets people use the internet with a phone call or SMS. A caller says a task and hangs up. An AI agent does it in a headless browser, calls back with questions if needed, then calls back with the result. Built for the c0mpiled-16 hackathon (Track 4: AI consumer products for 1 billion people; Track 2: No App). The build window is about 5.5 hours, so prefer small, working changes.
+Dial-Up lets people use the internet with a phone call or SMS. A caller says a task and hangs up. An AI agent does it in a headless browser, calls back with questions if needed, then calls back with the result. Built for the c0mpiled-16 hackathon (Track 4: AI consumer products for 1 billion people). The build window is about 5.5 hours, so prefer small, working changes.
 
 Run: `uvicorn dialup.app:app --port 8000`. Test: `python scripts/smoke_test.py` and `python -m pytest tests -q`. Live view: http://localhost:8000/live.
 
@@ -21,10 +21,12 @@ dialup/
   telephony/
     routes.py         POST /voice (language menu), POST /voice/language, WS /ws, POST /sms, POST /twilio/status
     notifier.py       TwilioNotifier: ask() and send_result(), voice or SMS by task.channel
+    lines.py          Lines: one call at a time per caller; status events release by call sid
     twiml.py          relay() and sms_reply()
     security.py       twilio_form(): parses form, checks signature if VALIDATE_TWILIO
   agent/
-    runner.py         Runner.start(task_id) -> background loop: Claude -> tool -> Guard
+    intake.py         clarify(): follow-up questions on the intake call until the task is clear
+    runner.py         Runner.start(task_id) -> background loop: Claude -> tool -> Guard; ask_user/confirm calls
     tools.py          TOOLS schemas + Browser (Playwright page wrapper)
     guards.py         Guard: hard limits (steps, time, tokens), predictive dollar budget, loop and no-effect detection
     guardrails.py     hard safety rules: irreversible clicks need a confirm yes; never type passwords, cards, SSNs
@@ -35,9 +37,11 @@ dialup/
     journal.py        Journal (log/update/status) + EventBus for the live view
     inbox.py          Inbox.ask() / deliver(): routes caller answers to the waiting task
   web/live.py         /live page, /live/stream SSE, /api/tasks
-  mock_sites/bus.py   /bus demo site
+  mock_sites/bus.py     /bus demo site (BusBook)
+  mock_sites/clinic.py  /clinic demo site (Harbor Community Clinic)
 scripts/smoke_test.py offline end-to-end test with ScriptedLLM and FakeCaller
-tests/                unit tests for the guard and guardrails (pytest)
+scripts/try_agent.py  real Claude + browser with the terminal as the phone
+tests/                unit tests for the guard, guardrails and lines (pytest)
 ```
 
 Dependency direction: telephony and web depend on tasks and agent. agent depends on tasks. tasks depends on nothing in the app. Don't import telephony from agent; the runner reaches the caller only through the `Notifier` protocol.
@@ -50,7 +54,8 @@ Dependency direction: telephony and web depend on tasks and agent. agent depends
 - Languages: English (`en`) and Chinese (`zh`). Never hardcode a caller-facing string in routes, runner or notifier. Add it to every language in `i18n.py` and use `phrases(task.language)`.
 - Every task carries `language`. Calls to the caller pass it to `twiml.relay(settings, lang, ...)`.
 - The agent never invents personal details. It uses `ask_user`.
-- Agent tools stay general (goto, read_page, click, fill). Never hardcode mock-site selectors into the agent or prompts.
+- Agent tools stay general (goto, read_page, click, fill, plus ask_user, confirm, finish, give_up). Never hardcode mock-site selectors into the agent or prompts.
+- Anything irreversible (book, hold, pay) goes through `confirm`; `guardrails.py` blocks it in code otherwise. Never weaken that check to make a demo pass.
 - Blocking SDK calls (Twilio client) go through `asyncio.to_thread`.
 - Escape user text in TwiML (`quoteattr`/`escape`) and HTML (`html.escape`).
 - Config comes from `Settings`. Add new settings to `config.py` and `.env.example` together. Never hardcode keys.
@@ -58,7 +63,7 @@ Dependency direction: telephony and web depend on tasks and agent. agent depends
 
 ## ConversationRelay protocol (don't change these shapes)
 
-Incoming: `{"type": "setup", "customParameters": {...}}`, `{"type": "prompt", "voicePrompt": "..."}`, `{"type": "error", ...}`.
+Incoming: `{"type": "setup", "customParameters": {...}}`, `{"type": "prompt", "voicePrompt": "..."}`, `{"type": "dtmf", "digit": "1"}` (keypress, answers questions), `{"type": "error", ...}`.
 Outgoing: `{"type": "text", "token": "<text>", "last": true}` to speak, `{"type": "end"}` to hang up.
 
 Twilio does speech-to-text and text-to-speech. Don't add audio handling, Deepgram or ElevenLabs.
