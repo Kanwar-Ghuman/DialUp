@@ -59,6 +59,7 @@ def booking_script(messages, step):
         _tool("fill", label="To", value="Los Angeles"),
         _tool("click", text="Search"),
         _tool("read_page"),
+        _tool("confirm", summary="Hold a seat on the cheapest bus, 19 dollars?"),
         _tool("click", text="Hold seat 3"),
         _tool("read_page"),
         _tool("ask_user", question="What name should the seat be under?"),
@@ -76,6 +77,21 @@ def booking_script(messages, step):
         return rest[i]
     page = _last_result(messages, "Seat held")
     return _tool("finish", summary=f"Done. {page.replace(chr(10), ' ')}")
+
+
+def unconfirmed_script(messages, step):
+    """Tries to book without asking the caller first. Should be blocked."""
+    plan = [
+        _tool("goto", url=f"{BASE}/bus"),
+        _tool("fill", label="From", value="San Diego"),
+        _tool("fill", label="To", value="Los Angeles"),
+        _tool("click", text="Search"),
+        _tool("click", text="Hold seat 3"),
+    ]
+    if step < len(plan):
+        return plan[step]
+    blocked = _last_result(messages, "BLOCKED")
+    return _tool("give_up", reason="blocked" if blocked else "not blocked")
 
 
 def impossible_script(messages, step):
@@ -97,7 +113,8 @@ class ScriptedLLM:
         goal = messages[0]["content"].lower()
         self.systems[goal] = system
         step = sum(1 for m in messages if m["role"] == "assistant")
-        script = impossible_script if "moon" in goal else looping_script if "teleport" in goal else booking_script
+        script = (impossible_script if "moon" in goal else looping_script if "teleport" in goal
+                  else unconfirmed_script if "sneaky" in goal else booking_script)
         _, name, args = script(messages, step)
         block = SimpleNamespace(type="tool_use", id=f"tu_{step}", name=name, input=args)
         return SimpleNamespace(content=[block], usage=SimpleNamespace(input_tokens=900, output_tokens=60))
@@ -135,7 +152,11 @@ class FakeCaller:
 
     async def ask(self, task, question):
         self.questions.append(question)
-        asyncio.create_task(self._answer(task, "王小明" if task.language == "zh" else "Kanwar"))
+        if "Say yes" in question or "确认请说" in question:
+            answer = "是" if task.language == "zh" else "yes"
+        else:
+            answer = "王小明" if task.language == "zh" else "Kanwar"
+        asyncio.create_task(self._answer(task, answer))
 
     async def _answer(self, task, answer):
         await asyncio.sleep(0.3)
@@ -198,6 +219,7 @@ async def main():
     t = await wait_for(store, caller, newest_id())
     check("task done", t.status == Status.DONE, t.status.value)
     check("agent asked for a name", any("name" in q for q in caller.questions))
+    check("caller was asked to confirm before the hold", any("Say yes" in q for q in caller.questions))
     check("cheapest bus held for Kanwar", "NightRider" in t.result and "Kanwar" in t.result, t.result)
 
     print("\n2. SMS: book a bus")
@@ -259,6 +281,13 @@ async def main():
     check("Chinese text gets a Chinese reply", "短信" in (reply or ""), reply)
     t = await wait_for(store, caller, newest_id())
     check("SMS task detected as Chinese", t.language == "zh" and t.status == Status.DONE, t.language)
+
+    print("\n7. Booking without the caller's yes")
+    await relay_call({"mode": "intake", "caller": CALLER}, "Sneaky: hold a bus seat without asking")
+    t = await wait_for(store, caller, newest_id())
+    kinds = [(e["kind"], e["text"]) for e in store.events(t.id)]
+    check("irreversible click is blocked", any(k == "guard" and x.startswith("blocked click") for k, x in kinds))
+    check("agent gives up instead of booking", t.status == Status.GAVE_UP and "blocked" in t.result, t.result)
 
     server.should_exit = True
     await serving

@@ -1,6 +1,7 @@
 """Runs tasks in the background: Claude decides, the browser acts, the guard supervises."""
 import asyncio
 import json
+import re
 from typing import Protocol
 
 from playwright.async_api import Browser as PWBrowser
@@ -72,6 +73,7 @@ class Runner:
         system = system_prompt(s.site_base, task.language)
         messages: list[dict] = [{"role": "user", "content": f"Caller's request: {task.goal}"}]
         asks = unanswered = 0
+        approved = False   # caller said yes to a confirm; unlocks irreversible clicks for this task
 
         while True:
             reply = await self.llm.messages.create(
@@ -93,21 +95,31 @@ class Runner:
                     return Status.DONE, call.input["summary"]
                 if call.name == "give_up":
                     return Status.GAVE_UP, say.gave_up.format(reason=call.input["reason"])
-                if call.name == "ask_user":
+                if call.name in ("ask_user", "confirm"):
                     if asks >= self.MAX_ASKS:
                         output = (f"BLOCKED: you already called the caller {self.MAX_ASKS} times. "
                                   "Don't call again. finish or give_up with what you have.")
                     else:
                         asks += 1
-                        answer = await self._ask(task, call.input["question"])
+                        question = (call.input["question"] if call.name == "ask_user"
+                                    else say.confirm.format(summary=call.input["summary"]))
+                        answer = await self._ask(task, question)
                         if answer is None:
                             unanswered += 1
                             if unanswered >= self.MAX_UNANSWERED:
                                 self.journal.log(task.id, "guard", "stopped: caller didn't answer twice")
                                 return Status.GAVE_UP, say.no_answer
                             output = "The caller didn't answer. Continue without it if you can, otherwise give_up."
+                        elif call.name == "confirm":
+                            approved = _is_yes(answer)
+                            self.journal.log(task.id, "guard", "caller approved" if approved else "caller declined")
+                            output = ("Caller said yes. Go ahead." if approved else
+                                      "Caller said no. Don't do it. Use finish to tell them it was cancelled.")
                         else:
                             output = f"Caller said: {answer}"
+                elif call.name == "click" and guardrails.is_irreversible(call.input.get("text", "")) and not approved:
+                    self.journal.log(task.id, "guard", f"blocked click without a yes: {call.input.get('text')}")
+                    output = "BLOCKED: that looks irreversible. Call confirm first and get a yes from the caller."
                 elif call.name in BROWSER_TOOLS:
                     output = await self._browse(task, browser, guard, call.name, call.input)
                 else:
@@ -154,6 +166,15 @@ class Runner:
         self.journal.log(task.id, "answer", answer if answer is not None else "(no answer)")
         self.journal.status(task.id, Status.RUNNING)
         return answer
+
+
+_NO = re.compile(r"\b(no|nope|don'?t|cancel|stop)\b|不|别|取消", re.IGNORECASE)
+_YES = re.compile(r"\b(yes|yeah|yep|sure|ok|okay|go ahead|confirm|do it)\b|^\s*1\s*$|是|好|对|可以|确认", re.IGNORECASE)
+
+
+def _is_yes(answer: str) -> bool:
+    """Plain yes/no from a spoken or texted answer. Any no wins, so "no, don't" isn't a yes."""
+    return not _NO.search(answer) and bool(_YES.search(answer))
 
 
 def _describe(name: str, args: dict) -> str:

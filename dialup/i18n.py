@@ -20,6 +20,7 @@ class Phrases:
     stopped: str         # {reason} filled in (may be ignored)
     crash: str
     no_answer: str       # two question calls went unanswered
+    confirm: str         # {summary} filled in; read to the caller before anything irreversible
 
 
 PHRASES: dict[str, Phrases] = {
@@ -39,6 +40,7 @@ PHRASES: dict[str, Phrases] = {
         stopped="Sorry, I had to stop. I {reason}. Try asking a simpler way.",
         crash="Sorry, something went wrong on our side. Please call again.",
         no_answer="I needed a quick answer from you but couldn't reach you, so I stopped. Call again anytime.",
+        confirm="{summary} Say yes to go ahead, or no to cancel.",
     ),
     "zh": Phrases(
         name="Simplified Mandarin Chinese",
@@ -56,6 +58,7 @@ PHRASES: dict[str, Phrases] = {
         stopped="抱歉，我不得不停下来。请换一种更简单的说法再试一次。",
         crash="抱歉，我们这边出了点问题。请再打一次。",
         no_answer="我需要问你一个问题，但没能联系上你，所以先停下了。有需要随时再打来。",
+        confirm="{summary} 确认请说“是”，取消请说“不”。",
     ),
 }
 

@@ -45,6 +45,17 @@ TOOLS = [
         },
     },
     {
+        "name": "confirm",
+        "description": "Phone the caller to approve something irreversible (booking, holding, paying) "
+                       "and wait for yes or no. Required before clicking anything like that.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"summary": {"type": "string",
+                                       "description": "What you're about to do, one short spoken sentence."}},
+            "required": ["summary"],
+        },
+    },
+    {
         "name": "finish",
         "description": "The task is done. The summary is read aloud to the caller.",
         "input_schema": {
