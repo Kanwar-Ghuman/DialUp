@@ -65,6 +65,9 @@ class Settings:
     languages: tuple[str, ...] = ("en", "zh")   # menu order: first is 1, second is 2
     default_language: str = "en"
     voices: dict[str, Voice] = field(default_factory=lambda: dict(DEFAULT_VOICES))
+    cost_budget: float = 0.50   # guard: USD per task, stops before crossing it (0 = off)
+    price_in: float = 2.0       # USD per million input tokens (Sonnet 5.5)
+    price_out: float = 10.0     # USD per million output tokens (Sonnet 5.5)
 
     @property
     def public_url(self) -> str:
@@ -100,4 +103,7 @@ def load_settings() -> Settings:
         languages=languages,
         default_language=default if default in languages else languages[0],
         voices={lang: _voice(lang) for lang in DEFAULT_VOICES},
+        cost_budget=float(os.getenv("COST_BUDGET", "0.50")),
+        price_in=float(os.getenv("PRICE_IN", "2.0")),
+        price_out=float(os.getenv("PRICE_OUT", "10.0")),
     )

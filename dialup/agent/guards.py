@@ -1,6 +1,8 @@
 """Supervisor for an unattended agent run: decides when to nudge it and when to stop it.
 
-Hard limits stop the run right away: steps, wall-clock time, tokens.
+Hard limits stop the run right away: steps, wall-clock time, tokens, and dollars.
+The dollar check is predictive: it stops BEFORE the next model call would cross the
+budget, leaving room for that call plus the closing message.
 Spinning (repeating an action, or clicking with no effect) gets one warning,
 then a stop if it happens again.
 """
@@ -22,12 +24,18 @@ class Guard:
     LOOP_REPEATS = 3    # same action this many times in the window = loop
     NO_EFFECT = 3       # clicks/gotos in a row that didn't change the page = stuck
 
-    def __init__(self, max_steps: int, max_seconds: float, token_budget: int):
+    def __init__(self, max_steps: int, max_seconds: float, token_budget: int,
+                 cost_budget: float = 0.0, price_in: float = 2.0, price_out: float = 10.0):
         self.max_steps = max_steps
         self.max_seconds = max_seconds
         self.token_budget = token_budget
+        self.cost_budget = cost_budget      # USD per task, 0 = off
+        self.price_in = price_in            # USD per million input tokens
+        self.price_out = price_out          # USD per million output tokens
         self.steps = 0
         self.tokens = 0
+        self.cost = 0.0
+        self._call_costs: list[float] = []
         self.started = time.monotonic()
         self._actions: deque[str] = deque(maxlen=self.LOOP_WINDOW)
         self._last_page: str | None = None
@@ -39,6 +47,21 @@ class Guard:
 
     def record_tokens(self, n: int) -> None:
         self.tokens += n
+
+    def record_usage(self, input_tokens: int, output_tokens: int) -> None:
+        """One model call's usage: counts tokens and dollars."""
+        self.tokens += input_tokens + output_tokens
+        c = (input_tokens * self.price_in + output_tokens * self.price_out) / 1_000_000
+        self.cost += c
+        self._call_costs.append(c)
+
+    def projected_cost(self) -> float:
+        """Spent so far plus two more calls (the next step and the closing message).
+        Calls get pricier as the conversation grows, so use the larger of last and average."""
+        if not self._call_costs:
+            return self.cost
+        estimate = max(self._call_costs[-1], self.cost / len(self._call_costs))
+        return self.cost + 2 * estimate
 
     def record_action(self, name: str, args: dict) -> None:
         self.steps += 1
@@ -63,6 +86,8 @@ class Guard:
             return Verdict("stop", f"ran past {int(self.max_seconds // 60)} minutes")
         if self.tokens > self.token_budget:
             return Verdict("stop", "used up my budget for this task")
+        if self.cost_budget and self.projected_cost() >= self.cost_budget:
+            return Verdict("stop", "was about to go over my budget for this task")
 
         problem = self._spinning()
         if not problem:

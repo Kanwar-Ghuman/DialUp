@@ -62,7 +62,8 @@ class Runner:
 
     async def _loop(self, task: Task, browser: Browser) -> tuple[Status, str]:
         s = self.settings
-        guard = Guard(s.max_steps, s.max_minutes * 60, s.token_budget)
+        guard = Guard(s.max_steps, s.max_minutes * 60, s.token_budget,
+                      s.cost_budget, s.price_in, s.price_out)
         say = phrases(task.language)
         system = system_prompt(s.site_base, task.language)
         messages: list[dict] = [{"role": "user", "content": f"Caller's request: {task.goal}"}]
@@ -71,7 +72,7 @@ class Runner:
             reply = await self.llm.messages.create(
                 model=s.model, max_tokens=1024, system=system, tools=TOOLS, messages=messages,
             )
-            guard.record_tokens(reply.usage.input_tokens + reply.usage.output_tokens)
+            guard.record_usage(reply.usage.input_tokens, reply.usage.output_tokens)
             messages.append({"role": "assistant", "content": reply.content})
 
             calls = [b for b in reply.content if b.type == "tool_use"]
