@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+python-multipart
+python-dotenv
+twilio
+anthropic
+playwright
+httpx
+websockets

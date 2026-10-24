@@ -1,0 +1,270 @@
+"""Offline end-to-end test. No Twilio, no Claude, no phone.
+
+Starts the real server and drives it the way Twilio would (ConversationRelay WebSocket
+and SMS webhook), with a scripted model in place of Claude and a fake caller that
+answers questions. Run from the project root:
+
+    python scripts/smoke_test.py
+"""
+import asyncio
+import json
+import os
+import sys
+import tempfile
+import xml.etree.ElementTree as ET
+from pathlib import Path
+from types import SimpleNamespace
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+for key, value in {"TWILIO_SID": "ACtest", "TWILIO_TOKEN": "test", "TWILIO_NUMBER": "+15550000000",
+                   "PUBLIC_HOST": "127.0.0.1:8765", "ANTHROPIC_API_KEY": "test"}.items():
+    os.environ.setdefault(key, value)
+
+import httpx  # noqa: E402
+import uvicorn  # noqa: E402
+import websockets  # noqa: E402
+
+from dialup.app import create_app  # noqa: E402
+from dialup.config import Settings  # noqa: E402
+from dialup.tasks.models import TERMINAL, Channel, Status  # noqa: E402
+from dialup.telephony import twiml  # noqa: E402
+
+PORT = 8765
+BASE = f"http://127.0.0.1:{PORT}"
+CALLER = "+15551112222"
+
+
+# ---------- Scripted stand-in for Claude ----------
+
+def _tool(name, **args):
+    return ("tool", name, args)
+
+
+def _last_result(messages, contains):
+    for m in reversed(messages):
+        if m["role"] == "user" and isinstance(m["content"], list):
+            for part in m["content"]:
+                text = part.get("content", "") if isinstance(part, dict) else ""
+                if contains in text:
+                    return text
+    return ""
+
+
+def booking_script(messages, step):
+    plan = [
+        _tool("goto", url=f"{BASE}/bus"),
+        _tool("read_page"),
+        _tool("fill", label="From", value="San Diego"),
+        _tool("fill", label="To", value="Los Angeles"),
+        _tool("click", text="Search"),
+        _tool("read_page"),
+        _tool("click", text="Hold seat 3"),
+        _tool("read_page"),
+        _tool("ask_user", question="What name should the seat be under?"),
+    ]
+    if step < len(plan):
+        return plan[step]
+    name = _last_result(messages, "Caller said:").removeprefix("Caller said: ") or "Unknown"
+    rest = [
+        _tool("fill", label="Passenger name", value=name),
+        _tool("click", text="Confirm hold"),
+        _tool("read_page"),
+    ]
+    i = step - len(plan)
+    if i < len(rest):
+        return rest[i]
+    page = _last_result(messages, "Seat held")
+    return _tool("finish", summary=f"Done. {page.replace(chr(10), ' ')}")
+
+
+def impossible_script(messages, step):
+    return _tool("give_up", reason="There are no buses to the moon.")
+
+
+def looping_script(messages, step):
+    if step == 0:
+        return _tool("goto", url=f"{BASE}/bus")
+    return _tool("click", text="Teleport")  # doesn't exist, so it fails every time
+
+
+class ScriptedLLM:
+    def __init__(self):
+        self.messages = self  # mimic client.messages.create
+        self.systems: dict[str, str] = {}
+
+    async def create(self, *, messages, system="", **_):
+        goal = messages[0]["content"].lower()
+        self.systems[goal] = system
+        step = sum(1 for m in messages if m["role"] == "assistant")
+        script = impossible_script if "moon" in goal else looping_script if "teleport" in goal else booking_script
+        _, name, args = script(messages, step)
+        block = SimpleNamespace(type="tool_use", id=f"tu_{step}", name=name, input=args)
+        return SimpleNamespace(content=[block], usage=SimpleNamespace(input_tokens=900, output_tokens=60))
+
+
+# ---------- Fake Twilio + fake caller ----------
+
+async def relay_call(params: dict, speech: str) -> list[dict]:
+    """Act like Twilio ConversationRelay: setup, caller speaks, collect what the server says."""
+    received = []
+    async with websockets.connect(f"ws://127.0.0.1:{PORT}/ws") as ws:
+        await ws.send(json.dumps({"type": "setup", "callSid": "CAtest", "customParameters": params}))
+        await ws.send(json.dumps({"type": "prompt", "voicePrompt": speech, "last": True}))
+        async for raw in ws:
+            msg = json.loads(raw)
+            received.append(msg)
+            if msg["type"] == "end":
+                break
+    return received
+
+
+async def sms(body: str) -> str:
+    async with httpx.AsyncClient() as client:
+        r = await client.post(f"{BASE}/sms", data={"From": CALLER, "Body": body})
+        r.raise_for_status()
+        return ET.fromstring(r.text).findtext("Message")
+
+
+class FakeCaller:
+    """Answers questions like a person would, and records what they were told."""
+
+    def __init__(self):
+        self.results: dict[str, str] = {}
+        self.questions: list[str] = []
+
+    async def ask(self, task, question):
+        self.questions.append(question)
+        asyncio.create_task(self._answer(task, "王小明" if task.language == "zh" else "Kanwar"))
+
+    async def _answer(self, task, answer):
+        await asyncio.sleep(0.3)
+        if task.channel == Channel.SMS:
+            await sms(answer)
+        else:
+            await relay_call({"mode": "ask", "task": task.id}, answer)
+
+    async def send_result(self, task, text):
+        self.results[task.id] = text
+
+
+# ---------- Test ----------
+
+async def wait_for(store, caller: FakeCaller, task_id: str, timeout=60):
+    for _ in range(int(timeout / 0.2)):
+        t = store.get(task_id)
+        if t and t.status in TERMINAL and task_id in caller.results:
+            return t
+        await asyncio.sleep(0.2)
+    raise TimeoutError(f"task {task_id} didn't finish")
+
+
+def check(label: str, ok: bool, detail: str = ""):
+    print(f"  {'PASS' if ok else 'FAIL'}  {label}{'  ' + detail if detail else ''}")
+    if not ok:
+        raise SystemExit(1)
+
+
+async def main():
+    db = tempfile.NamedTemporaryFile(suffix=".db", delete=False).name
+    settings = Settings(
+        twilio_sid="ACtest", twilio_token="test", twilio_number="+15550000000",
+        public_host=f"127.0.0.1:{PORT}", site_base=BASE, model="scripted",
+        max_steps=25, max_minutes=5, token_budget=400_000, ask_timeout=30, result_hold=1,
+        max_concurrent=3, callback_retries=1, validate_twilio=False, db_path=db,
+    )
+    caller = FakeCaller()
+    llm = ScriptedLLM()
+    app = create_app(settings=settings, notifier=caller, llm=llm)
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=PORT, log_level="warning"))
+    serving = asyncio.create_task(server.serve())
+    while not server.started:
+        await asyncio.sleep(0.05)
+    store = app.state.services.store
+
+    def newest_id():
+        return store.recent(1)[0].id
+
+    print("\nTwiML")
+    doc = ET.fromstring(twiml.relay(settings, "en", 'Say "hi" & <wave>', {"mode": "intake", "caller": CALLER}))
+    relay_el = doc.find("./Connect/ConversationRelay")
+    check("relay TwiML parses and escapes", relay_el is not None and relay_el.get("welcomeGreeting") == 'Say "hi" & <wave>')
+
+    print("\n1. Voice: book a bus")
+    said = await relay_call({"mode": "intake", "caller": CALLER},
+                            "Find the cheapest bus from San Diego to Los Angeles tomorrow and hold a seat")
+    check("caller hears confirmation", any("call you back" in m.get("token", "") for m in said))
+    check("call hangs up", said[-1]["type"] == "end")
+    t = await wait_for(store, caller, newest_id())
+    check("task done", t.status == Status.DONE, t.status.value)
+    check("agent asked for a name", any("name" in q for q in caller.questions))
+    check("cheapest bus held for Kanwar", "NightRider" in t.result and "Kanwar" in t.result, t.result)
+
+    print("\n2. SMS: book a bus")
+    reply = await sms("Find the cheapest bus from San Diego to Los Angeles and hold a seat")
+    check("texter gets confirmation", "text you back" in (reply or ""), reply)
+    t = await wait_for(store, caller, newest_id())
+    check("task done", t.status == Status.DONE, t.status.value)
+    check("seat held", "Seat held" in t.result)
+
+    print("\n3. Impossible task")
+    await relay_call({"mode": "intake", "caller": CALLER}, "Book me a bus to the moon")
+    t = await wait_for(store, caller, newest_id())
+    check("agent gives up", t.status == Status.GAVE_UP, t.status.value)
+    check("caller hears why", "moon" in caller.results[t.id], caller.results[t.id])
+
+    print("\n4. Stuck agent")
+    await relay_call({"mode": "intake", "caller": CALLER}, "Teleport me to Los Angeles")
+    t = await wait_for(store, caller, newest_id())
+    kinds = [(e["kind"], e["text"]) for e in store.events(t.id)]
+    check("guard warns first", any(k == "guard" and x.startswith("warning") for k, x in kinds))
+    check("guard stops it", t.status == Status.STOPPED, t.status.value)
+    check("stopped well before the step cap", t.steps < settings.max_steps, f"{t.steps} steps")
+    check("caller still gets a callback", "had to stop" in caller.results[t.id], caller.results[t.id])
+
+    print("\n5. Live view")
+    async with httpx.AsyncClient() as client:
+        page = await client.get(f"{BASE}/live")
+        tasks = (await client.get(f"{BASE}/api/tasks")).json()
+        bus_page = await client.get(f"{BASE}/bus")
+    check("live page loads", page.status_code == 200 and "Dial-Up live" in page.text)
+    check("API lists all tasks with events", len(tasks) == 4 and all(t["events"] for t in tasks))
+    check("mock bus site loads", "BusBook" in bus_page.text)
+
+    print("\n6. Language menu and Chinese")
+    async with httpx.AsyncClient() as client:
+        menu = (await client.post(f"{BASE}/voice", data={"From": CALLER})).text
+        zh = (await client.post(f"{BASE}/voice/language", data={"From": CALLER, "Digits": "2"})).text
+        none = (await client.post(f"{BASE}/voice/language", data={"From": CALLER, "Digits": ""})).text
+    m = ET.fromstring(menu)
+    says = [e.text for e in m.iter("Say")]
+    check("menu is a Gather with both languages", m.find("Gather") is not None
+          and says == ["For English, press 1.", "中文服务，请按 2。"], str(says))
+    zr = ET.fromstring(zh).find("./Connect/ConversationRelay")
+    check("pressing 2 starts a Chinese conversation", zr.get("ttsLanguage") == "cmn-CN"
+          and zr.get("welcomeGreeting").startswith("你好"), zr.get("ttsLanguage"))
+    check("no keypress falls back to English",
+          ET.fromstring(none).find("./Connect/ConversationRelay").get("ttsLanguage") == "en-US")
+
+    said = await relay_call({"mode": "intake", "caller": CALLER, "lang": "zh"},
+                            "帮我找明天从圣地亚哥到洛杉矶最便宜的巴士，并帮我订一个座位")
+    check("Chinese caller hears Chinese confirmation", any("收到" in m.get("token", "") for m in said))
+    t = await wait_for(store, caller, newest_id())
+    check("task stored as Chinese", t.language == "zh", t.language)
+    system = next(v for k, v in llm.systems.items() if t.goal.lower() in k)
+    check("agent told to speak Chinese", "Simplified Mandarin Chinese" in system)
+    check("Chinese task done, name from Chinese answer", t.status == Status.DONE and "王小明" in t.result, t.result)
+
+    reply = await sms("帮我订明天去洛杉矶最便宜的巴士")
+    check("Chinese text gets a Chinese reply", "短信" in (reply or ""), reply)
+    t = await wait_for(store, caller, newest_id())
+    check("SMS task detected as Chinese", t.language == "zh" and t.status == Status.DONE, t.language)
+
+    server.should_exit = True
+    await serving
+    os.unlink(db)
+    print("\nAll checks passed.\n")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
