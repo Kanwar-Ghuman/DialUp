@@ -2,7 +2,7 @@
 
 ## Pitch (30 seconds)
 
-3.1 billion people live under mobile internet coverage but don't use it. Nearly all of them can make a phone call.
+3.1 billion people live within mobile internet coverage but don't use it (GSMA). Most of them can make a phone call.
 
 With Dial-Up, you call a number, say what you need done, and hang up. An AI agent does the task in a real browser. If it needs something only you know, it calls and asks. When it's done, it calls back with the result.
 
@@ -38,21 +38,25 @@ Record each part twice, and keep the best take.
 1. **Say:** "I'm going to book a bus without touching a screen."
 2. Call the Dial-Up number on speaker. Press 1.
 3. **Say into the phone:** "Find me the cheapest bus from San Diego to Los Angeles tomorrow and hold a seat."
-4. Hang up. **Point at the live view:** "That's the agent working on its own. Searching, comparing prices, picking the cheapest."
-5. Phone rings. It asks for a name. Answer.
+   If it asks a follow-up (like the name to book under), answer it. It reads the task back, then hangs up.
+4. **Point at the live view:** "That's the agent working on its own. Searching, comparing prices, picking the cheapest."
+5. Phone rings: "Hold a seat on the 11 PM bus for 19 dollars? Say yes or press 1." **Press 1.**
+   **Say:** "It can't book anything until I say yes. That's enforced in code, not just in the prompt."
 6. Phone rings again with the seat, price and code.
 
 ### Part 2: Chinese (60 seconds)
 
 1. **Say:** "Most people offline don't speak English. Same number, same phone."
 2. Call, press 2. The greeting is in Chinese.
-3. **Say:** "帮我找明天从圣地亚哥到洛杉矶最便宜的巴士，并帮我订一个座位"
-4. Hang up. **Point at the live view:** "The bus site is in English. The agent reads it in English and talks to the caller in Chinese."
-5. Answer the name question in Chinese. The result comes back in Chinese.
+3. **Say:** "帮我找明天从圣地亚哥到洛杉矶最便宜的巴士，订一个座位。" Answer any follow-up (name: "我叫…"). Let it finish talking before you answer.
+4. **Point at the live view:** "The bus site is in English. The agent reads it in English and talks to the caller in Chinese."
+5. Confirm call: say "是的" (or press 1). Avoid 没问题 / anything with 不. The result comes back in Chinese.
 
 ### Part 3: Knowing when to stop (30 seconds, optional)
 
-Call and ask for a bus to the moon. Let it call back with the reason. If time is short, point at a past stopped task in the live view instead.
+Three endings, all with a callback: **done** (parts 1 and 2), **gave up** (ask for a bus to the moon), and **stopped**.
+For "stopped", run a task with a tiny budget beforehand (`python scripts/try_agent.py --budget 0.03 "..."`) and point at it in the live view:
+the guard stopped it before it went over budget, and the caller still heard what it found.
 
 ## Backup plan
 
@@ -65,14 +69,17 @@ Things that can break live: venue wifi, ngrok, Twilio, phone signal.
 
 ## Judge Q&A
 
-**Why not just use ChatGPT voice?**
-That needs a smartphone and a data plan. Dial-Up works on a basic phone with no internet, by voice or SMS.
+**Why not just call 1-800-ChatGPT?**
+It answers questions over the phone, in the US and Canada. Dial-Up does tasks: it works a real website for you, calls back when it needs you, and calls back with the result. Voice or SMS, any phone.
 
 **The bus site is fake.**
 The agent's tools are general: open, read, click, type. It isn't a scraper for one site. We used a mock site so the demo doesn't depend on a real booking site's uptime.
 
 **How does it know when to stop?**
-A guard watches every run. It has hard limits on steps, time and tokens. If the agent repeats itself or clicks with no effect, the guard warns it once, then stops it. Every path ends with a callback.
+A guard watches every run with measurable signals, not the agent's own opinion. It stops *before* a task would go over its dollar budget, and it has hard limits on steps and time. If the agent repeats itself or clicks with no effect, the guard warns it once, then stops it. Every path ends with a callback that says what it found.
+
+**What stops it from booking or paying by mistake?**
+Rules in code, not the prompt: clicks like Hold, Book or Pay are blocked until the caller says yes (or presses 1) on a confirm call, and it never types passwords, card numbers or ID numbers. Web page text is treated as data, never as instructions.
 
 **What if the caller misses the callback?**
 Twilio tells us the call wasn't answered, and Dial-Up calls again.

@@ -84,6 +84,11 @@ async def conversation_relay(ws: WebSocket):
                 said = msg.get("voicePrompt", "").strip()
                 if said:
                     heard.append(said)
+            elif kind == "dtmf" and ctx.get("mode") == "ask":
+                # A keypress answers a question too ("press 1 to confirm"). Ignored on other calls.
+                heard.clear()
+                if await _respond(ws, s, ctx, turns, str(msg.get("digit", "")).strip()):
+                    break
             elif kind == "error":
                 print(f"[call]   relay error: {msg}", flush=True)
     except WebSocketDisconnect:

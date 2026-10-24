@@ -35,28 +35,48 @@ BASE = f"http://127.0.0.1:{PORT}"
 CALLER = "+15550001111"
 
 
-async def relay(params: dict, speech: str, auto: str | None = None) -> None:
-    """Talk to the server the way Twilio ConversationRelay does. On an intake call,
-    the server may ask follow-up questions before hanging up; answer them here."""
+async def relay(params: dict, speech: str) -> None:
+    """Talk to the server the way Twilio ConversationRelay does."""
     try:
         async with websockets.connect(f"ws://127.0.0.1:{PORT}/ws") as ws:
             await ws.send(json.dumps({"type": "setup", "callSid": "CAlocal", "customParameters": params}))
             await ws.send(json.dumps({"type": "prompt", "voicePrompt": speech, "last": True}))
             async for raw in ws:
-                msg = json.loads(raw)
-                if msg["type"] == "end":
+                if json.loads(raw)["type"] == "end":
                     break
-                if msg["type"] == "text" and params.get("mode") == "intake":
-                    print(f"\n🗣  {msg['token']}", flush=True)
-                    if msg["token"].endswith(("?", "？")):
-                        if auto is not None:
-                            answer = auto
-                            print(f"   (auto) {answer}")
-                        else:
-                            answer = (await asyncio.to_thread(input, "   your answer: ")).strip() or "just pick"
-                        await ws.send(json.dumps({"type": "prompt", "voicePrompt": answer, "last": True}))
     except websockets.ConnectionClosed:
         pass  # server shut down while the "call" was still open
+
+
+def _speech_seconds(text: str) -> float:  # same estimate the server uses before hanging up
+    cjk = sum(1 for ch in text if ord(ch) >= 0x2E80)
+    return 2 + cjk * 0.25 + (len(text) - cjk) * 0.07
+
+
+async def intake_call(params: dict, request: str, auto: str | None) -> None:
+    """The first call. The server may ask follow-up questions before it hangs up."""
+    async with websockets.connect(f"ws://127.0.0.1:{PORT}/ws") as ws:
+        await ws.send(json.dumps({"type": "setup", "callSid": "CAlocal", "customParameters": params}))
+        await ws.send(json.dumps({"type": "prompt", "voicePrompt": request, "last": True}))
+        while True:
+            msg = json.loads(await ws.recv())
+            if msg["type"] == "end":
+                return
+            if msg["type"] != "text":
+                continue
+            print(f"📞 {msg['token']}", flush=True)
+            try:  # a closing line is followed by "end"; a question just waits for us to talk
+                end = json.loads(await asyncio.wait_for(ws.recv(), _speech_seconds(msg["token"]) + 3))
+                if end["type"] == "end":
+                    return
+            except asyncio.TimeoutError:
+                pass
+            if auto is not None:
+                answer = f"Any option is fine, you pick. Use the name {auto}."
+                print(f"   (auto) {answer}")
+            else:
+                answer = (await asyncio.to_thread(input, "   you say: ")).strip() or "You pick."
+            await ws.send(json.dumps({"type": "prompt", "voicePrompt": answer, "last": True}))
 
 
 class TerminalPhone:
@@ -104,7 +124,7 @@ async def main(a):
 
     started = time.monotonic()
     print(f"\nTask ({a.lang}): {a.request}\n", flush=True)
-    await relay({"mode": "intake", "caller": CALLER, "lang": a.lang}, a.request, a.auto)
+    await intake_call({"mode": "intake", "caller": CALLER, "lang": a.lang}, a.request, a.auto)
     await phone.done.wait()
 
     store = app.state.services.store

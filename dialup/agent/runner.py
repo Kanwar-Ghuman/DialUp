@@ -120,10 +120,16 @@ class Runner:
                                 return Status.GAVE_UP, say.no_answer
                             output = "The caller didn't answer. Continue without it if you can, otherwise give_up."
                         elif call.name == "confirm":
-                            approved = _is_yes(answer)
-                            self.journal.log(task.id, "guard", "caller approved" if approved else "caller declined")
-                            output = ("Caller said yes. Go ahead." if approved else
-                                      "Caller said no. Don't do it. Use finish to tell them it was cancelled.")
+                            verdict_ = _classify(answer)
+                            approved = verdict_ == "yes"
+                            self.journal.log(task.id, "guard", {"yes": "caller approved", "no": "caller declined",
+                                                                "unclear": f"unclear answer: {answer}"}[verdict_])
+                            output = {
+                                "yes": "Caller said yes. Go ahead.",
+                                "no": "Caller said no. Don't do it. Use finish to tell them it was cancelled.",
+                                "unclear": f"The caller said \"{answer}\", which isn't a clear yes or no. "
+                                           "Call confirm once more and ask them to say yes or no.",
+                            }[verdict_]
                         else:
                             output = f"Caller said: {answer}"
                 elif call.name == "click" and guardrails.is_irreversible(call.input.get("text", "")) and not approved:
@@ -140,7 +146,8 @@ class Runner:
             verdict = guard.check()
             if verdict.action == "stop":
                 self.journal.log(task.id, "guard", f"stopped: {verdict.reason}")
-                return Status.STOPPED, say.stopped.format(reason=verdict.reason)
+                summary = await self._stop_summary(task, system, messages, results, verdict.reason)
+                return Status.STOPPED, summary or say.stopped.format(reason=verdict.reason)
 
             if results:
                 if verdict.action == "warn":
@@ -149,6 +156,26 @@ class Runner:
                 messages.append({"role": "user", "content": results})
             else:
                 messages.append({"role": "user", "content": NO_TOOL_NUDGE})
+
+    async def _stop_summary(self, task: Task, system: str, messages: list[dict],
+                            results: list[dict], reason: str) -> str:
+        """The guard stopped the run. One last model call, no tools, to tell the caller
+        what was found before stopping. The budget check already reserved room for it.
+        Returns "" on any problem, and the caller gets the standard stop phrase instead."""
+        p = phrases(task.language)
+        ask = (f"Supervisor: you have been stopped because you {reason}. Don't call any tools. "
+               f"In {p.name}, in at most 40 words of plain sentences, tell the caller what you found "
+               f"so far and that you had to stop. Say prices in words, like \"{p.price_example}\".")
+        content = results + [{"type": "text", "text": ask}] if results else ask
+        try:
+            reply = await asyncio.wait_for(self.llm.messages.create(
+                model=self.settings.model, max_tokens=300, system=system, tools=TOOLS,
+                tool_choice={"type": "none"}, messages=messages + [{"role": "user", "content": content}],
+            ), timeout=30)
+        except Exception as e:
+            self.journal.log(task.id, "error", f"stop summary failed: {type(e).__name__}")
+            return ""
+        return " ".join(b.text for b in reply.content if getattr(b, "type", "") == "text").strip()
 
     async def _browse(self, task: Task, browser: Browser, guard: Guard, name: str, args: dict) -> str:
         if name == "fill":
@@ -177,13 +204,27 @@ class Runner:
         return answer
 
 
-_NO = re.compile(r"\b(no|nope|don'?t|cancel|stop)\b|不|别|取消", re.IGNORECASE)
-_YES = re.compile(r"\b(yes|yeah|yep|sure|ok|okay|go ahead|confirm|do it)\b|^\s*1\s*$|是|好|对|可以|确认", re.IGNORECASE)
+_NO = re.compile(
+    r"\b(no|nope|nah|don'?t|do not|cancel|stop|never ?mind)\b|^\W*2\W*$|不|别|取消|算了",
+    re.IGNORECASE)
+_YES = re.compile(
+    r"\b(yes|yeah|yep|yup|ya|sure|ok|okay|go ahead|go for it|confirm(ed)?|do it|sounds good|correct"
+    r"|right|please do|absolutely|of course|book it|hold it)\b|^\W*1\W*$"
+    r"|是|好|对|可以|确认|没问题|行|嗯|当然|订吧|要的",
+    re.IGNORECASE)
+
+
+def _classify(answer: str) -> str:
+    """'yes', 'no' or 'unclear' from a spoken, typed or keypad answer (1 = yes, 2 = no).
+    Any no wins, so "no, don't" is a no. The gate is code, not the agent's judgment,
+    so nothing on a web page can talk it into a yes."""
+    if _NO.search(answer):
+        return "no"
+    return "yes" if _YES.search(answer) else "unclear"
 
 
 def _is_yes(answer: str) -> bool:
-    """Plain yes/no from a spoken or texted answer. Any no wins, so "no, don't" isn't a yes."""
-    return not _NO.search(answer) and bool(_YES.search(answer))
+    return _classify(answer) == "yes"
 
 
 def _describe(name: str, args: dict) -> str:

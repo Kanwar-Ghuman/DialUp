@@ -20,6 +20,7 @@ def relay(settings: Settings, lang: str, greeting: str, params: dict[str, str]) 
         "transcriptionProvider": v.transcription_provider,
         "speechModel": v.speech_model,
         "welcomeGreeting": greeting,
+        "dtmfDetection": "true",  # keypresses arrive as {"type": "dtmf"} messages (press 1 = yes)
     }
     attr_xml = "".join(f" {k}={quoteattr(val)}" for k, val in attrs.items() if val)
     parameters = "".join(
