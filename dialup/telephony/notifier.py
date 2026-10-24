@@ -13,12 +13,19 @@ class TwilioNotifier:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.client = Client(settings.twilio_sid, settings.twilio_token)
+        self.asking: dict[str, str] = {}  # task id -> question being asked, for retries
 
     async def ask(self, task: Task, question: str) -> None:
         if task.channel == Channel.SMS:
             await self._text(task.caller, f"{question} {phrases(task.language).sms_reply_hint}")
         else:
-            await self._call(task, question, {"mode": "ask", "task": task.id})
+            self.asking[task.id] = question
+            await self.call_question(task, question, attempt=1)
+
+    async def call_question(self, task: Task, question: str, attempt: int) -> None:
+        """Question call with a status callback, so a busy or unanswered call is retried."""
+        status_url = f"{self.settings.public_url}/twilio/status?task={task.id}&attempt={attempt}&kind=ask"
+        await self._call(task, question, {"mode": "ask", "task": task.id}, status_url)
 
     async def send_result(self, task: Task, text: str) -> None:
         if task.channel == Channel.SMS:

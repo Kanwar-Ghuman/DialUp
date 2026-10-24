@@ -104,17 +104,37 @@ def looping_script(messages, step):
     return _tool("click", text="Teleport")  # doesn't exist, so it fails every time
 
 
+def unreachable_script(messages, step):
+    """Asks a question the caller never gets. Should move on without waiting for the timeout."""
+    if step == 0:
+        return _tool("ask_user", question="What name should the seat be under?")
+    return _tool("give_up", reason="I couldn't reach you to get a name.")
+
+
+def intake_decision(transcript):
+    """Vague requests get one follow-up; everything else starts right away."""
+    turns = [line.removeprefix("Caller: ") for line in transcript.splitlines() if line.startswith("Caller: ")]
+    if "vague" in turns[0].lower() and len(turns) == 1:
+        return {"ready": False, "question": "Where from and where to?", "task": turns[0]}
+    return {"ready": True, "task": " ".join(turns)}
+
+
 class ScriptedLLM:
     def __init__(self):
         self.messages = self  # mimic client.messages.create
         self.systems: dict[str, str] = {}
 
-    async def create(self, *, messages, system="", **_):
+    async def create(self, *, messages, system="", tools=(), **_):
+        if tools and tools[0]["name"] == "intake_decision":
+            block = SimpleNamespace(type="tool_use", id="tu_intake", name="intake_decision",
+                                    input=intake_decision(messages[0]["content"]))
+            return SimpleNamespace(content=[block], usage=SimpleNamespace(input_tokens=300, output_tokens=40))
         goal = messages[0]["content"].lower()
         self.systems[goal] = system
         step = sum(1 for m in messages if m["role"] == "assistant")
         script = (impossible_script if "moon" in goal else looping_script if "teleport" in goal
-                  else unconfirmed_script if "sneaky" in goal else booking_script)
+                  else unconfirmed_script if "sneaky" in goal else unreachable_script if "unreachable" in goal
+                  else booking_script)
         _, name, args = script(messages, step)
         block = SimpleNamespace(type="tool_use", id=f"tu_{step}", name=name, input=args)
         return SimpleNamespace(content=[block], usage=SimpleNamespace(input_tokens=900, output_tokens=60))
@@ -122,17 +142,21 @@ class ScriptedLLM:
 
 # ---------- Fake Twilio + fake caller ----------
 
-async def relay_call(params: dict, speech: str) -> list[dict]:
-    """Act like Twilio ConversationRelay: setup, caller speaks, collect what the server says."""
+async def relay_call(params: dict, *speech: str) -> list[dict]:
+    """Act like Twilio ConversationRelay: setup, then the caller says each line after the
+    server speaks. Collects everything the server says until it hangs up."""
     received = []
+    lines = list(speech)
     async with websockets.connect(f"ws://127.0.0.1:{PORT}/ws") as ws:
         await ws.send(json.dumps({"type": "setup", "callSid": "CAtest", "customParameters": params}))
-        await ws.send(json.dumps({"type": "prompt", "voicePrompt": speech, "last": True}))
+        await ws.send(json.dumps({"type": "prompt", "voicePrompt": lines.pop(0), "last": True}))
         async for raw in ws:
             msg = json.loads(raw)
             received.append(msg)
             if msg["type"] == "end":
                 break
+            if msg["type"] == "text" and lines:
+                await ws.send(json.dumps({"type": "prompt", "voicePrompt": lines.pop(0), "last": True}))
     return received
 
 
@@ -149,9 +173,13 @@ class FakeCaller:
     def __init__(self):
         self.results: dict[str, str] = {}
         self.questions: list[str] = []
+        self.asking: dict[str, str] = {}
 
     async def ask(self, task, question):
         self.questions.append(question)
+        if "unreachable" in task.goal.lower():
+            asyncio.create_task(self._busy(task))
+            return
         if "Say yes" in question or "确认请说" in question:
             answer = "是" if task.language == "zh" else "yes"
         else:
@@ -164,6 +192,13 @@ class FakeCaller:
             await sms(answer)
         else:
             await relay_call({"mode": "ask", "task": task.id}, answer)
+
+    async def _busy(self, task):
+        """Twilio reports the question call as busy, with no retries left."""
+        await asyncio.sleep(0.3)
+        async with httpx.AsyncClient() as client:
+            await client.post(f"{BASE}/twilio/status?task={task.id}&attempt=2&kind=ask",
+                              data={"CallStatus": "busy"})
 
     async def send_result(self, task, text):
         self.results[task.id] = text
@@ -288,6 +323,23 @@ async def main():
     kinds = [(e["kind"], e["text"]) for e in store.events(t.id)]
     check("irreversible click is blocked", any(k == "guard" and x.startswith("blocked click") for k, x in kinds))
     check("agent gives up instead of booking", t.status == Status.GAVE_UP and "blocked" in t.result, t.result)
+
+    print("\n8. Intake asks for missing details")
+    said = await relay_call({"mode": "intake", "caller": CALLER},
+                            "Vague: get me a bus ticket", "From San Diego to Los Angeles, name Kanwar")
+    texts = [m.get("token", "") for m in said if m["type"] == "text"]
+    check("caller hears a follow-up before hang-up", texts[0] == "Where from and where to?", str(texts))
+    check("then hears the task read back", "San Diego" in texts[-1] and "call you back" in texts[-1], texts[-1])
+    t = await wait_for(store, caller, newest_id())
+    check("task has details from both answers", "Vague" in t.goal and "Kanwar" in t.goal, t.goal)
+
+    print("\n9. Question call is busy")
+    started = asyncio.get_running_loop().time()
+    await relay_call({"mode": "intake", "caller": CALLER}, "Unreachable: hold a bus seat")
+    t = await wait_for(store, caller, newest_id())
+    waited = asyncio.get_running_loop().time() - started
+    check("task moves on without waiting for the answer timeout", waited < settings.ask_timeout / 2, f"{waited:.1f}s")
+    check("caller still gets a callback", t.status == Status.GAVE_UP and t.id in caller.results, t.status.value)
 
     server.should_exit = True
     await serving

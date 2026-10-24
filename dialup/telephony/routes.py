@@ -4,6 +4,7 @@ import json
 
 from fastapi import APIRouter, BackgroundTasks, Request, Response, WebSocket, WebSocketDisconnect
 
+from ..agent.intake import clarify
 from ..i18n import detect, phrases
 from ..services import Services, services
 from ..tasks.models import Channel
@@ -12,7 +13,9 @@ from .security import twilio_form
 
 router = APIRouter()
 
-RETRY_DELAY = 30  # seconds before calling back again after an unanswered result call
+RETRY_DELAY = 30      # seconds before calling back again after an unanswered result call
+ASK_RETRY_DELAY = 10  # busy usually means the caller is still hanging up from the last call
+UNREACHED = {"busy", "no-answer", "failed", "canceled"}
 
 
 def _xml(body: str) -> Response:
@@ -54,6 +57,7 @@ async def conversation_relay(ws: WebSocket):
     await ws.accept()
     s = services(ws)
     ctx: dict[str, str] = {}
+    turns: list[str] = []  # what the caller said so far on an intake call
     timer: asyncio.Task | None = None
     try:
         async for raw in ws.iter_text():
@@ -67,9 +71,21 @@ async def conversation_relay(ws: WebSocket):
                     # The result is the greeting. Hang up once it's been read.
                     timer = asyncio.create_task(_hang_up(ws, s.settings.result_hold))
             elif kind == "prompt":
-                reply = _handle_speech(s, ctx, msg.get("voicePrompt", "").strip())
+                said = msg.get("voicePrompt", "").strip()
+                if not said:
+                    continue
+                if ctx.get("mode") == "intake":
+                    turns.append(said)
+                    lang = ctx.get("lang") or s.settings.default_language
+                    question, task_text = await clarify(s.runner.llm, s.settings.model, lang, turns)
+                    if question:
+                        await _say(ws, question)
+                        continue
+                    reply = _start_task(s, ctx, turns, task_text)
+                else:
+                    reply = _handle_speech(s, ctx, said)
                 await _say(ws, reply)
-                await _hang_up(ws, 4)
+                await _hang_up(ws, _speech_seconds(reply))
                 break
             elif kind == "error":
                 print(f"[call]   relay error: {msg}", flush=True)
@@ -80,15 +96,18 @@ async def conversation_relay(ws: WebSocket):
             timer.cancel()
 
 
+def _start_task(s: Services, ctx: dict[str, str], turns: list[str], task_text: str) -> str:
+    lang = ctx.get("lang") or s.settings.default_language
+    task = s.store.create_task(ctx["caller"], task_text, Channel.VOICE, lang)
+    s.journal.log(task.id, "intake", f"({lang}) {' / '.join(turns)}")
+    s.runner.start(task.id)
+    return phrases(lang).got_it_task.format(task=task_text)
+
+
 def _handle_speech(s: Services, ctx: dict[str, str], said: str) -> str:
     mode = ctx.get("mode")
     lang = ctx.get("lang") or s.settings.default_language
     say = phrases(lang)
-    if mode == "intake":
-        task = s.store.create_task(ctx["caller"], said, Channel.VOICE, lang)
-        s.journal.log(task.id, "intake", f"({lang}) {said}")
-        s.runner.start(task.id)
-        return say.got_it_voice
     if mode == "ask":
         if s.inbox.deliver(ctx.get("task", ""), said):
             return say.thanks
@@ -100,6 +119,12 @@ async def _say(ws: WebSocket, text: str) -> None:
     await ws.send_text(json.dumps({"type": "text", "token": text, "last": True}))
 
 
+def _speech_seconds(text: str) -> float:
+    """Rough time to read `text` aloud, so the call doesn't end mid-sentence."""
+    cjk = sum(1 for ch in text if ord(ch) >= 0x2E80)
+    return 2 + cjk * 0.25 + (len(text) - cjk) * 0.07
+
+
 async def _hang_up(ws: WebSocket, delay: float) -> None:
     await asyncio.sleep(delay)  # let text-to-speech finish
     try:
@@ -109,15 +134,31 @@ async def _hang_up(ws: WebSocket, delay: float) -> None:
 
 
 @router.post("/twilio/status")
-async def call_status(request: Request, background: BackgroundTasks, task: str, attempt: int = 1):
-    """Twilio reports how a result call ended. Retry if nobody picked up."""
+async def call_status(request: Request, background: BackgroundTasks, task: str,
+                      attempt: int = 1, kind: str = "result"):
+    """Twilio reports how a question or result call ended. Retry if nobody picked up."""
     form = await twilio_form(request)
     s = services(request)
     outcome = form.get("CallStatus", "unknown")
-    s.journal.log(task, "call", f"result call {outcome} (attempt {attempt})")
+    s.journal.log(task, "call", f"{'question' if kind == 'ask' else 'result'} call {outcome} (attempt {attempt})")
 
     t = s.store.get(task)
-    if outcome in {"busy", "no-answer", "failed"} and t and t.result and attempt <= s.settings.callback_retries:
+    if kind == "ask":
+        if not s.inbox.is_waiting(task):
+            return Response(status_code=204)  # answered, or the task moved on
+        question = s.notifier.asking.get(task)
+        if outcome in UNREACHED and t and question and attempt <= s.settings.callback_retries:
+            async def retry_question():
+                await asyncio.sleep(ASK_RETRY_DELAY)
+                if s.inbox.is_waiting(task):
+                    s.journal.log(task, "call", f"retrying question call (attempt {attempt + 1})")
+                    await s.notifier.call_question(t, question, attempt + 1)
+            background.add_task(retry_question)
+        else:
+            s.inbox.no_answer(task)
+        return Response(status_code=204)
+
+    if outcome in UNREACHED and t and t.result and attempt <= s.settings.callback_retries:
         async def retry():
             await asyncio.sleep(RETRY_DELAY)
             s.journal.log(task, "call", f"retrying result call (attempt {attempt + 1})")

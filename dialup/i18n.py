@@ -9,7 +9,7 @@ class Phrases:
     price_example: str   # how the agent should say a price out loud
     menu: str            # language menu line, {digit} filled in
     greeting: str
-    got_it_voice: str
+    got_it_task: str     # {task} filled in; read back at the end of the intake call
     got_it_sms: str
     thanks: str
     late_answer: str
@@ -29,7 +29,7 @@ PHRASES: dict[str, Phrases] = {
         price_example="19 dollars",
         menu="For English, press {digit}.",
         greeting="Hi, this is Dial-Up. Tell me what you need done online.",
-        got_it_voice="Got it. I'm working on it and will call you back.",
+        got_it_task="Got it. {task} I'm working on it and will call you back.",
         got_it_sms="Got it. I'm working on it and will text you back.",
         thanks="Thanks. Back to work.",
         late_answer="Thanks. That question already timed out, but I'll still call you with the result.",
@@ -47,7 +47,7 @@ PHRASES: dict[str, Phrases] = {
         price_example="19美元",
         menu="中文服务，请按 {digit}。",
         greeting="你好，这里是 Dial-Up。请告诉我你需要在网上办什么事。",
-        got_it_voice="收到。我现在就去办，办好后给你回电话。",
+        got_it_task="收到。{task} 我现在就去办，办好后给你回电话。",
         got_it_sms="收到。我现在就去办，办好后给你发短信。",
         thanks="谢谢，我继续去办。",
         late_answer="谢谢。这个问题已经超时了，不过我还是会打电话告诉你结果。",

@@ -25,3 +25,13 @@ class Inbox:
             fut.set_result(answer)
             return True
         return False
+
+    def is_waiting(self, task_id: str) -> bool:
+        fut = self._waiting.get(task_id)
+        return bool(fut and not fut.done())
+
+    def no_answer(self, task_id: str) -> None:
+        """The question never reached the caller. Stop waiting now instead of at the timeout."""
+        fut = self._waiting.get(task_id)
+        if fut and not fut.done():
+            fut.set_result(None)
