@@ -94,6 +94,28 @@ def unconfirmed_script(messages, step):
     return _tool("give_up", reason="blocked" if blocked else "not blocked")
 
 
+def clinic_script(messages, step):
+    plan = [
+        _tool("goto", url=f"{BASE}/clinic"),
+        _tool("read_page"),
+        _tool("fill", label="Patient full name", value="Kanwar Ghuman"),
+        _tool("fill", label="Date of birth", value="03/15/1958"),
+        _tool("fill", label="Reason for visit", value="Flu shot"),
+        _tool("click", text="Find appointments"),
+        _tool("read_page"),
+        _tool("click", text="Select"),
+        _tool("read_page"),
+        _tool("click", text="Book appointment"),   # blocked: no yes yet
+        _tool("confirm", summary="Book the earliest open flu shot appointment?"),
+        _tool("click", text="Book appointment"),
+        _tool("read_page"),
+    ]
+    if step < len(plan):
+        return plan[step]
+    page = _last_result(messages, "Appointment booked")
+    return _tool("finish", summary=page.replace(chr(10), " "))
+
+
 def impossible_script(messages, step):
     return _tool("give_up", reason="There are no buses to the moon.")
 
@@ -133,7 +155,7 @@ class ScriptedLLM:
         self.systems[goal] = system
         step = sum(1 for m in messages if m["role"] == "assistant")
         script = (impossible_script if "moon" in goal else looping_script if "teleport" in goal
-                  else unconfirmed_script if "sneaky" in goal else unreachable_script if "unreachable" in goal
+                  else unconfirmed_script if "sneaky" in goal else clinic_script if "clinic" in goal else unreachable_script if "unreachable" in goal
                   else booking_script)
         _, name, args = script(messages, step)
         block = SimpleNamespace(type="tool_use", id=f"tu_{step}", name=name, input=args)
@@ -379,6 +401,13 @@ async def main():
     waited = asyncio.get_running_loop().time() - started
     check("task moves on without waiting for the answer timeout", waited < settings.ask_timeout / 2, f"{waited:.1f}s")
     check("caller still gets a callback", t.status == Status.GAVE_UP and t.id in caller.results, t.status.value)
+
+    print("\n10. Clinic appointment")
+    await relay_call({"mode": "intake", "caller": CALLER}, "Book me a flu shot at the community clinic this week")
+    t = await wait_for(store, caller, newest_id())
+    kinds = [(e["kind"], e["text"]) for e in store.events(t.id)]
+    check("booking click blocked until the caller's yes", any(k == "guard" and x.startswith("blocked click") for k, x in kinds))
+    check("appointment booked after the yes", t.status == Status.DONE and "Appointment booked" in t.result, t.result)
 
     server.should_exit = True
     await serving
