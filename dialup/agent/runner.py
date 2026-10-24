@@ -24,6 +24,9 @@ class Notifier(Protocol):
 
 
 class Runner:
+    MAX_ASKS = 4         # calls to the caller per task (questions + confirmations)
+    MAX_UNANSWERED = 2   # unanswered calls before we stop trying
+
     def __init__(self, settings: Settings, store: Store, journal: Journal,
                  inbox: Inbox, notifier: Notifier, llm):
         self.settings = settings
@@ -68,6 +71,7 @@ class Runner:
         say = phrases(task.language)
         system = system_prompt(s.site_base, task.language)
         messages: list[dict] = [{"role": "user", "content": f"Caller's request: {task.goal}"}]
+        asks = unanswered = 0
 
         while True:
             reply = await self.llm.messages.create(
@@ -90,7 +94,20 @@ class Runner:
                 if call.name == "give_up":
                     return Status.GAVE_UP, say.gave_up.format(reason=call.input["reason"])
                 if call.name == "ask_user":
-                    output = await self._ask(task, call.input["question"])
+                    if asks >= self.MAX_ASKS:
+                        output = (f"BLOCKED: you already called the caller {self.MAX_ASKS} times. "
+                                  "Don't call again. finish or give_up with what you have.")
+                    else:
+                        asks += 1
+                        answer = await self._ask(task, call.input["question"])
+                        if answer is None:
+                            unanswered += 1
+                            if unanswered >= self.MAX_UNANSWERED:
+                                self.journal.log(task.id, "guard", "stopped: caller didn't answer twice")
+                                return Status.GAVE_UP, say.no_answer
+                            output = "The caller didn't answer. Continue without it if you can, otherwise give_up."
+                        else:
+                            output = f"Caller said: {answer}"
                 elif call.name in BROWSER_TOOLS:
                     output = await self._browse(task, browser, guard, call.name, call.input)
                 else:
@@ -128,16 +145,15 @@ class Runner:
             guard.record_page(output)
         return output
 
-    async def _ask(self, task: Task, question: str) -> str:
+    async def _ask(self, task: Task, question: str) -> str | None:
+        """Calls (or texts) the caller and waits. Returns their answer, or None if no answer."""
         self.journal.status(task.id, Status.WAITING)
         answer = await self.inbox.ask(
             task.id, lambda: self.notifier.ask(task, question), self.settings.ask_timeout,
         )
         self.journal.log(task.id, "answer", answer if answer is not None else "(no answer)")
         self.journal.status(task.id, Status.RUNNING)
-        if answer is None:
-            return "The caller didn't answer. Continue without it if you can, otherwise give_up."
-        return f"Caller said: {answer}"
+        return answer
 
 
 def _describe(name: str, args: dict) -> str:
