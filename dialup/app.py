@@ -7,7 +7,7 @@ from playwright.async_api import async_playwright
 
 from .agent.runner import Notifier, Runner
 from .config import Settings, load_settings
-from .mock_sites import bus
+from .mock_sites import bus, clinic
 from .services import Services
 from .tasks.inbox import Inbox
 from .tasks.journal import EventBus, Journal
@@ -62,6 +62,7 @@ def create_app(settings: Settings | None = None, notifier: Notifier | None = Non
     app.include_router(telephony.router)
     app.include_router(live.router)
     app.include_router(bus.router)
+    app.include_router(clinic.router)
 
     @app.get("/", include_in_schema=False)
     async def root():
