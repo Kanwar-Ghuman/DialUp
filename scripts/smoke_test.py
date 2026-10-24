@@ -160,6 +160,16 @@ async def relay_call(params: dict, *speech: str) -> list[dict]:
     return received
 
 
+async def relay_keypress(params: dict, digit: str) -> None:
+    """Like relay_call, but the caller presses a key instead of speaking."""
+    async with websockets.connect(f"ws://127.0.0.1:{PORT}/ws") as ws:
+        await ws.send(json.dumps({"type": "setup", "callSid": "CAtest", "customParameters": params}))
+        await ws.send(json.dumps({"type": "dtmf", "digit": digit}))
+        async for raw in ws:
+            if json.loads(raw)["type"] == "end":
+                break
+
+
 async def sms(body: str) -> str:
     async with httpx.AsyncClient() as client:
         r = await client.post(f"{BASE}/sms", data={"From": CALLER, "Body": body})
@@ -174,6 +184,7 @@ class FakeCaller:
         self.results: dict[str, str] = {}
         self.questions: list[str] = []
         self.asking: dict[str, str] = {}
+        self.keypresses: list[str] = []
 
     async def ask(self, task, question):
         self.questions.append(question)
@@ -181,10 +192,18 @@ class FakeCaller:
             asyncio.create_task(self._busy(task))
             return
         if "Say yes" in question or "确认请说" in question:
+            if task.channel == Channel.VOICE and task.language == "en":
+                asyncio.create_task(self._press(task, "1"))  # English voice confirms by keypad
+                return
             answer = "是" if task.language == "zh" else "yes"
         else:
             answer = "王小明" if task.language == "zh" else "Kanwar"
         asyncio.create_task(self._answer(task, answer))
+
+    async def _press(self, task, digit):
+        await asyncio.sleep(0.3)
+        self.keypresses.append(digit)
+        await relay_keypress({"mode": "ask", "task": task.id}, digit)
 
     async def _answer(self, task, answer):
         await asyncio.sleep(0.3)
@@ -245,6 +264,7 @@ async def main():
     doc = ET.fromstring(twiml.relay(settings, "en", 'Say "hi" & <wave>', {"mode": "intake", "caller": CALLER}))
     relay_el = doc.find("./Connect/ConversationRelay")
     check("relay TwiML parses and escapes", relay_el is not None and relay_el.get("welcomeGreeting") == 'Say "hi" & <wave>')
+    check("keypresses are turned on", relay_el.get("dtmfDetection") == "true")
 
     print("\n1. Voice: book a bus")
     said = await relay_call({"mode": "intake", "caller": CALLER},
@@ -255,6 +275,7 @@ async def main():
     check("task done", t.status == Status.DONE, t.status.value)
     check("agent asked for a name", any("name" in q for q in caller.questions))
     check("caller was asked to confirm before the hold", any("Say yes" in q for q in caller.questions))
+    check("confirmed by pressing 1 on the keypad", caller.keypresses == ["1"], str(caller.keypresses))
     check("cheapest bus held for Kanwar", "NightRider" in t.result and "Kanwar" in t.result, t.result)
 
     print("\n2. SMS: book a bus")

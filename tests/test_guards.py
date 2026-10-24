@@ -2,7 +2,7 @@
 (scripts/smoke_test.py covers the full server end to end.)"""
 from dialup.agent import guardrails
 from dialup.agent.guards import Guard
-from dialup.agent.runner import _is_yes
+from dialup.agent.runner import _classify, _is_yes
 
 
 def guard(budget=0.50):
@@ -57,5 +57,14 @@ def test_secrets_are_never_typed():
 def test_yes_no_parsing():
     for a in ["yes", "Yeah go ahead", "ok", "1", "是", "好的", "可以"]:
         assert _is_yes(a), a
-    for a in ["no", "no, don't", "cancel it", "不要", "不是", "", "Kanwar"]:
+    for a in ["no", "no, don't", "cancel it", "不要", "不是", "", "Kanwar", "2"]:
         assert not _is_yes(a), a
+
+
+def test_confirm_has_three_outcomes():
+    for a in ["没问题", "行", "嗯，订吧", "sure, go for it", "sounds good", "1", " 1 "]:
+        assert _classify(a) == "yes", a
+    for a in ["no", "算了", "2", "nope, cancel", "不用了", "never mind"]:
+        assert _classify(a) == "no", a
+    for a in ["Kanwar", "what time is it?", "um", ""]:
+        assert _classify(a) == "unclear", a
