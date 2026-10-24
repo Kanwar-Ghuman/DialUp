@@ -15,7 +15,9 @@ router = APIRouter()
 
 RETRY_DELAY = 30      # seconds before calling back again after an unanswered result call
 ASK_RETRY_DELAY = 10  # busy usually means the caller is still hanging up from the last call
+ANSWER_GRACE = 5      # a spoken answer can arrive just after Twilio says the call ended
 UNREACHED = {"busy", "no-answer", "failed", "canceled"}
+TERMINAL_CALL = UNREACHED | {"completed"}
 
 
 def _xml(body: str) -> Response:
@@ -60,6 +62,7 @@ async def conversation_relay(ws: WebSocket):
     turns: list[str] = []  # what the caller said so far on an intake call
     heard: list[str] = []  # pieces of the current answer; people pause mid-sentence
     timer: asyncio.Task | None = None
+    line: tuple[str, str] | None = None  # (caller, token) while an inbound call holds the line
     try:
         while True:
             try:
@@ -80,6 +83,12 @@ async def conversation_relay(ws: WebSocket):
                 if ctx.get("mode") == "result":
                     # The result is the greeting. Hang up once it's been read.
                     timer = asyncio.create_task(_hang_up(ws, s.settings.result_hold))
+                elif ctx.get("mode") == "intake" and ctx.get("caller"):
+                    # Hold the line for the whole inbound call, so no callback rings until they hang up.
+                    lines = getattr(s.notifier, "lines", None)
+                    if lines:
+                        line = (ctx["caller"], f"in-{id(ws)}")
+                        await lines.hold(*line)
             elif kind == "prompt":
                 said = msg.get("voicePrompt", "").strip()
                 if said:
@@ -96,6 +105,8 @@ async def conversation_relay(ws: WebSocket):
     finally:
         if timer:
             timer.cancel()
+        if line:
+            s.notifier.lines.release(*line)
 
 
 async def _respond(ws: WebSocket, s: Services, ctx: dict[str, str], turns: list[str], said: str) -> bool:
@@ -164,6 +175,26 @@ async def _hang_up(ws: WebSocket, delay: float) -> None:
         pass  # caller already hung up
 
 
+def _current_question(notifier, task: str) -> tuple[str | None, str | None, bool]:
+    """(question, call sid, tracked). Untracked means a test caller: any status applies."""
+    asking = getattr(notifier, "asking", None)
+    if not isinstance(asking, dict) or task not in asking:
+        return None, None, False
+    entry = asking[task]
+    if isinstance(entry, tuple):
+        return entry[0], entry[1], True
+    return entry, None, True
+
+
+def _same_question_call(tracked: bool, current_sid: str | None, incoming_sid: str | None) -> bool:
+    """A status event counts only for the call we're waiting on now."""
+    if not tracked:
+        return True
+    if not current_sid:
+        return False  # the call hasn't been placed yet
+    return not incoming_sid or incoming_sid == current_sid
+
+
 @router.post("/twilio/status")
 async def call_status(request: Request, background: BackgroundTasks, task: str,
                       attempt: int = 1, kind: str = "result"):
@@ -174,19 +205,35 @@ async def call_status(request: Request, background: BackgroundTasks, task: str,
     s.journal.log(task, "call", f"{'question' if kind == 'ask' else 'result'} call {outcome} (attempt {attempt})")
 
     t = s.store.get(task)
+    sid = form.get("CallSid")
+    lines = getattr(s.notifier, "lines", None)
+    if lines and t and sid and outcome in TERMINAL_CALL:
+        lines.release(t.caller, sid)  # frees the line only if this call still holds it
+
     if kind == "ask":
         if not s.inbox.is_waiting(task):
             return Response(status_code=204)  # answered, or the task moved on
-        question = s.notifier.asking.get(task)
+        question, current_sid, tracked = _current_question(s.notifier, task)
+        if not _same_question_call(tracked, current_sid, sid):
+            return Response(status_code=204)  # a previous call ending; the current one is still open
         if outcome in UNREACHED and t and question and attempt <= s.settings.callback_retries:
             async def retry_question():
                 await asyncio.sleep(ASK_RETRY_DELAY)
-                if s.inbox.is_waiting(task):
+                _, now, _ = _current_question(s.notifier, task)
+                if s.inbox.is_waiting(task) and now == current_sid:
                     s.journal.log(task, "call", f"retrying question call (attempt {attempt + 1})")
                     await s.notifier.call_question(t, question, attempt + 1)
             background.add_task(retry_question)
-        else:
+        elif outcome in UNREACHED or not tracked:
             s.inbox.no_answer(task)
+        elif outcome == "completed":
+            async def settle():  # they may have answered in the last seconds of the call
+                await asyncio.sleep(ANSWER_GRACE)
+                _, now, _ = _current_question(s.notifier, task)
+                if s.inbox.is_waiting(task) and now == current_sid:
+                    s.journal.log(task, "call", "question call ended without an answer")
+                    s.inbox.no_answer(task)
+            background.add_task(settle)
         return Response(status_code=204)
 
     if outcome in UNREACHED and t and t.result and attempt <= s.settings.callback_retries:

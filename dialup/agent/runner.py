@@ -81,7 +81,7 @@ class Runner:
         say = phrases(task.language)
         system = system_prompt(s.site_base, task.language)
         messages: list[dict] = [{"role": "user", "content": f"Caller's request: {task.goal}"}]
-        asks = unanswered = 0
+        asks = unanswered = confirm_reasks = 0
         approved = False   # caller said yes to a confirm; unlocks irreversible clicks for this task
 
         while True:
@@ -124,14 +124,22 @@ class Runner:
                             approved = verdict_ == "yes"
                             self.journal.log(task.id, "guard", {"yes": "caller approved", "no": "caller declined",
                                                                 "unclear": f"unclear answer: {answer}"}[verdict_])
+                            if verdict_ == "unclear":
+                                confirm_reasks += 1
                             output = {
-                                "yes": "Caller said yes. Go ahead.",
-                                "no": "Caller said no. Don't do it. Use finish to tell them it was cancelled.",
-                                "unclear": f"The caller said \"{answer}\", which isn't a clear yes or no. "
-                                           "Call confirm once more and ask them to say yes or no.",
+                                "yes": "Caller said yes. Go ahead. Don't ask again.",
+                                "no": "Caller said no. Don't do it, and don't ask again. "
+                                      "Use finish to tell them it was cancelled.",
+                                "unclear": (
+                                    f"The caller said \"{answer}\", which isn't a clear yes or no. "
+                                    "Don't call again. give_up and tell them what you found."
+                                    if confirm_reasks >= 2 else
+                                    f"The caller said \"{answer}\", which isn't a clear yes or no. "
+                                    "Call confirm one more time, shorter, and ask them to say yes or no."
+                                ),
                             }[verdict_]
                         else:
-                            output = f"Caller said: {answer}"
+                            output = f"Caller said: {answer}. Use this answer. Don't ask the same question again."
                 elif call.name == "click" and guardrails.is_irreversible(call.input.get("text", "")) and not approved:
                     self.journal.log(task.id, "guard", f"blocked click without a yes: {call.input.get('text')}")
                     output = "BLOCKED: that looks irreversible. Call confirm first and get a yes from the caller."
