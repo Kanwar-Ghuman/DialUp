@@ -50,8 +50,16 @@ class Runner:
             task = self.store.get(task_id)
             self.journal.status(task_id, Status.RUNNING)
             context = await self.browser.new_context()
+            # Hard ceiling so a hung page or API call still ends in a callback. The guard's
+            # time check only runs between steps; this one can interrupt mid-step.
+            hard_limit = self.settings.max_minutes * 60 + 60
             try:
-                status, spoken = await self._loop(task, Browser(await context.new_page()))
+                status, spoken = await asyncio.wait_for(
+                    self._loop(task, Browser(await context.new_page())), timeout=hard_limit)
+            except asyncio.TimeoutError:
+                self.journal.log(task_id, "guard", f"stopped: hard time limit ({int(hard_limit)}s)")
+                status, spoken = Status.STOPPED, phrases(task.language).stopped.format(
+                    reason=f"ran past {int(self.settings.max_minutes)} minutes")
             except Exception as e:  # never leave a caller without a callback
                 self.journal.log(task_id, "error", f"{type(e).__name__}: {e}")
                 status, spoken = Status.FAILED, phrases(task.language).crash

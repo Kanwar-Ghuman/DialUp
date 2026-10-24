@@ -38,7 +38,7 @@ def create_app(settings: Settings | None = None, notifier: Notifier | None = Non
             model = llm
         else:
             from anthropic import AsyncAnthropic
-            model = AsyncAnthropic()
+            model = AsyncAnthropic(timeout=60, max_retries=2)  # a hung API call can't stall a task
 
         runner = Runner(s, store, journal, inbox, notify, model)
         pw = await async_playwright().start()
