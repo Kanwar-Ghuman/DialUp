@@ -15,7 +15,7 @@ from ..tasks.store import Store
 from . import guardrails
 from .guards import Guard
 from .prompts import NO_TOOL_NUDGE, SUPERVISOR_WARNING, system_prompt
-from .tools import BROWSER_TOOLS, TOOLS, Browser
+from .tools import BROWSER_TOOLS, TOOLS, USER_AGENT, Browser
 
 
 class Notifier(Protocol):
@@ -49,7 +49,8 @@ class Runner:
         async with self._slots:
             task = self.store.get(task_id)
             self.journal.status(task_id, Status.RUNNING)
-            context = await self.browser.new_context()
+            context = await self.browser.new_context(user_agent=USER_AGENT, locale="en-US",
+                                                     viewport={"width": 1280, "height": 900})
             # Hard ceiling so a hung page or API call still ends in a callback. The guard's
             # time check only runs between steps; this one can interrupt mid-step.
             hard_limit = self.settings.max_minutes * 60 + 60
