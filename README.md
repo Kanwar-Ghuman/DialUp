@@ -91,5 +91,5 @@ Twilio ConversationRelay (speech-to-text and text-to-speech), FastAPI, Claude to
 
 - **Kanwar** built the server, telephony, task store, live view and mock site in Cursor, with a project rules file (`.cursor/rules/dial-up.mdc`) that gives the assistant the architecture and coding rules on every change. _Kanwar: add anything distinctive here._
 - **Sirui** used Claude to build the supervisor's dollar budget, the code-level guardrails, the confirm flow and the tests, first as a standalone prototype and then ported into this codebase in small, separately tested commits.
-- **What we did differently:** we treated AI output as untrusted until it ran. Every change was checked with the offline smoke test and real model runs. That caught a budget cap that overshot (now predictive) and a booking click the prompt alone didn't stop (now blocked in code).
+- **What we did differently:** we treated AI output as untrusted until it ran. Every commit passes the offline smoke test, and the prototype was tested with real model runs. Those runs caught a budget cap that overshot its limit (now predictive) and two API issues before they reached the shared code.
 
