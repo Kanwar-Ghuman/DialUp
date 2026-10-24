@@ -8,7 +8,7 @@ alwaysApply: true
 
 Dial-Up lets people use the internet with a phone call or SMS. A caller says a task and hangs up. An AI agent does it in a headless browser, calls back with questions if needed, then calls back with the result. Built for the c0mpiled-16 hackathon (Track 4: AI consumer products for 1 billion people; Track 2: No App). The build window is about 5.5 hours, so prefer small, working changes.
 
-Run: `uvicorn dialup.app:app --port 8000`. Test: `python scripts/smoke_test.py`. Live view: http://localhost:8000/live.
+Run: `uvicorn dialup.app:app --port 8000`. Test: `python scripts/smoke_test.py` and `python -m pytest tests -q`. Live view: http://localhost:8000/live.
 
 ## Architecture
 
@@ -26,7 +26,8 @@ dialup/
   agent/
     runner.py         Runner.start(task_id) -> background loop: Claude -> tool -> Guard
     tools.py          TOOLS schemas + Browser (Playwright page wrapper)
-    guards.py         Guard: hard limits (steps, time, tokens), loop and no-effect detection
+    guards.py         Guard: hard limits (steps, time, tokens), predictive dollar budget, loop and no-effect detection
+    guardrails.py     hard safety rules: irreversible clicks need a confirm yes; never type passwords, cards, SSNs
     prompts.py        system_prompt(), SUPERVISOR_WARNING, NO_TOOL_NUDGE
   tasks/
     models.py         Task, Status, Channel
@@ -36,6 +37,7 @@ dialup/
   web/live.py         /live page, /live/stream SSE, /api/tasks
   mock_sites/bus.py   /bus demo site
 scripts/smoke_test.py offline end-to-end test with ScriptedLLM and FakeCaller
+tests/                unit tests for the guard and guardrails (pytest)
 ```
 
 Dependency direction: telephony and web depend on tasks and agent. agent depends on tasks. tasks depends on nothing in the app. Don't import telephony from agent; the runner reaches the caller only through the `Notifier` protocol.
