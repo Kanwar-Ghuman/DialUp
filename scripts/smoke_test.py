@@ -26,6 +26,7 @@ import uvicorn  # noqa: E402
 import websockets  # noqa: E402
 
 from dialup.app import create_app  # noqa: E402
+from dialup.tasks.live import LiveBoard  # noqa: E402
 from dialup.config import Settings  # noqa: E402
 from dialup.tasks.models import TERMINAL, Channel, Status  # noqa: E402
 from dialup.telephony import twiml  # noqa: E402
@@ -126,6 +127,11 @@ def looping_script(messages, step):
     return _tool("click", text="Teleport")  # doesn't exist, so it fails every time
 
 
+def hours_script(messages, step):
+    """A fact, answered out loud on the call the caller is already on."""
+    return _tool("finish", summary="The store closes at 8 PM.")
+
+
 def unreachable_script(messages, step):
     """Asks a question the caller never gets. Should move on without waiting for the timeout."""
     if step == 0:
@@ -138,7 +144,9 @@ def intake_decision(transcript):
     turns = [line.removeprefix("Caller: ") for line in transcript.splitlines() if line.startswith("Caller: ")]
     if "vague" in turns[0].lower() and len(turns) == 1:
         return {"ready": False, "question": "Where from and where to?", "task": turns[0]}
-    return {"ready": True, "task": " ".join(turns)}
+    if "what time" in turns[0].lower() and len(turns) == 1:
+        return {"ready": True, "quick": True, "task": turns[0]}
+    return {"ready": True, "quick": False, "task": " ".join(turns)}
 
 
 class ScriptedLLM:
@@ -155,7 +163,8 @@ class ScriptedLLM:
         self.systems[goal] = system
         step = sum(1 for m in messages if m["role"] == "assistant")
         script = (impossible_script if "moon" in goal else looping_script if "teleport" in goal
-                  else unconfirmed_script if "sneaky" in goal else clinic_script if "clinic" in goal else unreachable_script if "unreachable" in goal
+                  else unconfirmed_script if "sneaky" in goal else clinic_script if "clinic" in goal
+                  else unreachable_script if "unreachable" in goal else hours_script if "what time" in goal
                   else booking_script)
         _, name, args = script(messages, step)
         block = SimpleNamespace(type="tool_use", id=f"tu_{step}", name=name, input=args)
@@ -214,9 +223,12 @@ class FakeCaller:
         self.questions: list[str] = []
         self.asking: dict[str, str] = {}
         self.keypresses: list[str] = []
+        self.live = LiveBoard()
 
     async def ask(self, task, question):
         self.questions.append(question)
+        if await self.live.ask(task.id, question):
+            return  # the caller is still on the line; that call speaks the question
         if "unreachable" in task.goal.lower():
             asyncio.create_task(self._busy(task))
             return
@@ -250,6 +262,7 @@ class FakeCaller:
 
     async def send_result(self, task, text):
         self.results[task.id] = text
+        await self.live.result(task.id, text)  # no effect unless this task is being answered live
 
 
 # ---------- Test ----------
@@ -408,6 +421,15 @@ async def main():
     kinds = [(e["kind"], e["text"]) for e in store.events(t.id)]
     check("booking click blocked until the caller's yes", any(k == "guard" and x.startswith("blocked click") for k, x in kinds))
     check("appointment booked after the yes", t.status == Status.DONE and "Appointment booked" in t.result, t.result)
+
+    print("\n11. Simple question, answered on the same call")
+    said = await relay_call({"mode": "intake", "caller": CALLER}, "What time does the store close today?")
+    texts = [m.get("token", "") for m in said if m["type"] == "text"]
+    check("caller hears the answer before hang-up",
+          any("One moment" in t for t in texts) and any("8 PM" in t for t in texts), str(texts))
+    check("no callback is promised", all("call you back" not in t for t in texts))
+    t = store.recent(1)[0]
+    check("task done on the call", t.status == Status.DONE and "8 PM" in (t.result or ""), t.result)
 
     server.should_exit = True
     await serving

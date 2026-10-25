@@ -1,6 +1,8 @@
 """Twilio endpoints: inbound calls, the language menu, the ConversationRelay socket, SMS, call status."""
 import asyncio
+import contextlib
 import json
+import time
 
 from fastapi import APIRouter, BackgroundTasks, Request, Response, WebSocket, WebSocketDisconnect
 
@@ -18,6 +20,7 @@ ASK_RETRY_DELAY = 10  # busy usually means the caller is still hanging up from t
 ANSWER_GRACE = 5      # a spoken answer can arrive just after Twilio says the call ended
 UNREACHED = {"busy", "no-answer", "failed", "canceled"}
 TERMINAL_CALL = UNREACHED | {"completed"}
+LIVE_LIMIT = 90  # seconds to answer on the same call before switching to a callback
 
 
 def _xml(body: str) -> Response:
@@ -53,70 +56,149 @@ async def chose_language(request: Request):
     return _intake(s, lang, form["From"])
 
 
+class _Ear:
+    """One pending read from the socket, reused across waits so a timeout never drops a message."""
+
+    def __init__(self, ws: WebSocket):
+        self.ws = ws
+        self._task: asyncio.Task | None = None
+
+    def pending(self) -> asyncio.Task:
+        if self._task is None or self._task.done():
+            self._task = asyncio.create_task(self.ws.receive_text())
+        return self._task
+
+
 @router.websocket("/ws")
 async def conversation_relay(ws: WebSocket):
     """Every call, inbound or outbound, lands here. The `mode` parameter says what it's for."""
     await ws.accept()
     s = services(ws)
-    ctx: dict[str, str] = {}
+    ctx: dict = {}
     turns: list[str] = []  # what the caller said so far on an intake call
     heard: list[str] = []  # pieces of the current answer; people pause mid-sentence
     timer: asyncio.Task | None = None
     line: tuple[str, str] | None = None  # (caller, token) while an inbound call holds the line
+    ear = _Ear(ws)
     try:
         while True:
-            try:
-                raw = await (asyncio.wait_for(ws.receive_text(), s.settings.speech_pause)
-                             if heard else ws.receive_text())
-            except asyncio.TimeoutError:  # caller went quiet: treat what we heard as one answer
+            if _live_expired(ctx):
+                await _switch_to_callback(ws, s, ctx)
+                break
+            incoming = ear.pending()
+            waiters = [incoming]
+            spoken = s.notifier.live.pending(ctx["live_id"]) if ctx.get("live_id") else None
+            if spoken:
+                waiters.append(spoken)
+            timeout = s.settings.speech_pause if heard else None
+            done, _ = await asyncio.wait(waiters, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+            if spoken and spoken not in done:
+                spoken.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await spoken
+            if not done:  # caller went quiet: treat what we heard as one answer
                 said = " ".join(heard)
                 heard.clear()
+                if ctx.get("live_id"):
+                    if said:
+                        s.inbox.deliver(ctx["live_id"], said)
+                    continue
                 if await _respond(ws, s, ctx, turns, said):
                     break
                 continue
-            msg = json.loads(raw)
-            kind = msg.get("type")
-            if kind == "setup":
-                ctx = msg.get("customParameters") or {}
-                print(f"[call]   setup mode={ctx.get('mode')} lang={ctx.get('lang', '-')} "
-                      f"task={ctx.get('task', '-')}", flush=True)
-                if ctx.get("mode") == "result":
-                    # The result is the greeting. Hang up once it's been read.
+            if incoming in done:
+                try:
+                    raw = incoming.result()
+                except WebSocketDisconnect:
+                    _handle_hangup(s, ctx, turns, " ".join(heard))
+                    break
+                if _on_message(ctx, heard, json.loads(raw)):
+                    said = heard.pop() if heard else ""
+                    heard.clear()
+                    if ctx.get("live_id"):
+                        s.inbox.deliver(ctx["live_id"], said)
+                    elif await _respond(ws, s, ctx, turns, said):
+                        break
+                elif ctx.get("mode") == "result" and timer is None and ctx.get("_result"):
                     timer = asyncio.create_task(_hang_up(ws, s.settings.result_hold))
-                elif ctx.get("mode") == "intake" and ctx.get("caller"):
-                    # Hold the line for the whole inbound call, so no callback rings until they hang up.
+                elif ctx.get("mode") == "intake" and ctx.get("caller") and line is None:
                     lines = getattr(s.notifier, "lines", None)
                     if lines:
                         line = (ctx["caller"], f"in-{id(ws)}")
                         await lines.hold(*line)
-            elif kind == "prompt":
-                said = msg.get("voicePrompt", "").strip()
-                if said:
-                    heard.append(said)
-            elif kind == "dtmf" and ctx.get("mode") == "ask":
-                # A keypress answers a question too ("press 1 to confirm"). Ignored on other calls.
+            if spoken and spoken in done:
+                kind, text = spoken.result()
                 heard.clear()
-                if await _respond(ws, s, ctx, turns, str(msg.get("digit", "")).strip()):
+                await _say(ws, text)
+                if kind == "result":
+                    await _hang_up(ws, _speech_seconds(text))
                     break
-            elif kind == "error":
-                print(f"[call]   relay error: {msg}", flush=True)
-    except WebSocketDisconnect:
-        _handle_hangup(s, ctx, turns, " ".join(heard))
+                ctx["live_deadline"] = time.monotonic() + LIVE_LIMIT  # time to answer the question
     finally:
         if timer:
             timer.cancel()
+        if ear._task and not ear._task.done():
+            ear._task.cancel()
+        if ear._task:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await ear._task  # retrieve its result so a disconnect isn't reported as a stray error
+        if ctx.get("live_id"):
+            s.notifier.live.close(ctx["live_id"])  # a late result is phoned out instead
         if line:
             s.notifier.lines.release(*line)
 
 
-async def _respond(ws: WebSocket, s: Services, ctx: dict[str, str], turns: list[str], said: str) -> bool:
+def _live_expired(ctx: dict) -> bool:
+    deadline = ctx.get("live_deadline")
+    return bool(ctx.get("live_id") and deadline and time.monotonic() > deadline)
+
+
+async def _switch_to_callback(ws: WebSocket, s: Services, ctx: dict) -> None:
+    """The lookup ran long. Hang up and let the normal callback deliver the result."""
+    s.notifier.live.close(ctx.pop("live_id"))
+    ctx.pop("live_deadline", None)
+    lang = ctx.get("lang") or s.settings.default_language
+    text = phrases(lang).still_working
+    await _say(ws, text)
+    await _hang_up(ws, _speech_seconds(text))
+
+
+def _on_message(ctx: dict, heard: list[str], msg: dict) -> bool:
+    """Record one socket message. Returns True when the caller just gave a complete answer
+    (a keypress), so the caller should reply now instead of waiting out the pause."""
+    kind = msg.get("type")
+    if kind == "setup":
+        ctx.update(msg.get("customParameters") or {})
+        print(f"[call]   setup mode={ctx.get('mode')} lang={ctx.get('lang', '-')} "
+              f"task={ctx.get('task', '-')}", flush=True)
+        ctx["_result"] = ctx.get("mode") == "result"
+        return False
+    if kind == "prompt":
+        said = msg.get("voicePrompt", "").strip()
+        if said:
+            heard.append(said)
+        return False
+    if kind == "dtmf" and (ctx.get("mode") == "ask" or ctx.get("live_id")):
+        # A keypress answers a question too ("press 1 to confirm"). Ignored on other calls.
+        heard[:] = [str(msg.get("digit", "")).strip()]
+        return True
+    if kind == "error":
+        print(f"[call]   relay error: {msg}", flush=True)
+    return False
+
+
+async def _respond(ws: WebSocket, s: Services, ctx: dict, turns: list[str], said: str) -> bool:
     """Reply to one full answer. Returns True once the call is over."""
     if ctx.get("mode") == "intake":
         turns.append(said)
         lang = ctx.get("lang") or s.settings.default_language
-        question, task_text = await clarify(s.runner.llm, s.settings.model, lang, turns)
+        question, task_text, quick = await clarify(s.runner.llm, s.settings.model, lang, turns)
         if question:
             await _say(ws, question)
+            return False
+        if quick and getattr(s.notifier, "live", None):
+            await _say(ws, phrases(lang).one_moment)
+            _start_live(s, ctx, turns, task_text)
             return False
         reply = _start_task(s, ctx, turns, task_text)
     else:
@@ -137,13 +219,27 @@ def _handle_hangup(s: Services, ctx: dict[str, str], turns: list[str], said: str
         _handle_speech(s, ctx, said)
 
 
-def _start_task(s: Services, ctx: dict[str, str], turns: list[str], task_text: str) -> str:
+def _create_task(s: Services, ctx: dict, turns: list[str], task_text: str):
     lang = ctx.get("lang") or s.settings.default_language
     ctx["started"] = "1"
     task = s.store.create_task(ctx["caller"], task_text, Channel.VOICE, lang)
     s.journal.log(task.id, "intake", f"({lang}) {' / '.join(turns)}")
+    return task
+
+
+def _start_task(s: Services, ctx: dict, turns: list[str], task_text: str) -> str:
+    task = _create_task(s, ctx, turns, task_text)
     s.runner.start(task.id)
-    return phrases(lang).got_it_task.format(task=task_text)
+    return phrases(task.language).got_it_task.format(task=task_text)
+
+
+def _start_live(s: Services, ctx: dict, turns: list[str], task_text: str) -> None:
+    """Answer on this call. Open the live queue before the agent starts, so a fast answer isn't missed."""
+    task = _create_task(s, ctx, turns, task_text)
+    s.notifier.live.open(task.id)
+    ctx["live_id"] = task.id
+    ctx["live_deadline"] = time.monotonic() + LIVE_LIMIT
+    s.runner.start(task.id)
 
 
 def _handle_speech(s: Services, ctx: dict[str, str], said: str) -> str:

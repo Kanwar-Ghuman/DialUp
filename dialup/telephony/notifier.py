@@ -6,6 +6,7 @@ from twilio.rest import Client
 from ..config import Settings
 from ..i18n import phrases
 from ..tasks.models import Channel, Task
+from ..tasks.live import LiveBoard
 from . import twiml
 from .lines import Lines
 
@@ -15,9 +16,12 @@ class TwilioNotifier:
         self.settings = settings
         self.client = Client(settings.twilio_sid, settings.twilio_token)
         self.lines = Lines()
+        self.live = LiveBoard()
         self.asking: dict[str, tuple[str, str | None]] = {}  # task id -> (question, call sid)
 
     async def ask(self, task: Task, question: str) -> None:
+        if await self.live.ask(task.id, question):
+            return  # they're still on the line; the open call speaks the question
         if task.channel == Channel.SMS:
             await self._text(task.caller, f"{question} {phrases(task.language).sms_reply_hint}")
         else:
@@ -31,6 +35,8 @@ class TwilioNotifier:
         self.asking[task.id] = (question, sid)
 
     async def send_result(self, task: Task, text: str) -> None:
+        if await self.live.result(task.id, text):
+            return  # spoken on the call they're already on
         if task.channel == Channel.SMS:
             await self._text(task.caller, text)
         else:
