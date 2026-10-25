@@ -10,6 +10,7 @@ class Phrases:
     menu: str            # language menu line, {digit} filled in
     greeting: str
     got_it_task: str     # {task} filled in; read back at the end of the intake call
+    ack: str             # spoken the instant the caller finishes, before the real reply
     one_moment: str      # spoken when a simple question is answered on this same call
     still_working: str   # spoken if a same-call answer is taking too long; then we call back
     got_it_sms: str
@@ -32,6 +33,7 @@ PHRASES: dict[str, Phrases] = {
         menu="For English, press {digit}.",
         greeting="Hi, this is Dial-Up. Tell me what you need done online.",
         got_it_task="Got it. {task} I'm working on it and will call you back.",
+        ack="Okay.",
         one_moment="One moment. I'll look that up.",
         still_working="This is taking a bit longer. I'll call you back with the answer.",
         got_it_sms="Got it. I'm working on it and will text you back.",
@@ -52,6 +54,7 @@ PHRASES: dict[str, Phrases] = {
         menu="中文服务，请按 {digit}。",
         greeting="你好，这里是 Dial-Up。请告诉我你需要在网上办什么事。",
         got_it_task="收到。{task} 我现在就去办，办好后给你回电话。",
+        ack="好的。",
         one_moment="请稍等，我查一下。",
         still_working="还要一点时间。我查好后给你回电话。",
         got_it_sms="收到。我现在就去办，办好后给你发短信。",

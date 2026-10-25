@@ -103,6 +103,9 @@ async def conversation_relay(ws: WebSocket):
                     if said:
                         s.inbox.deliver(ctx["live_id"], said)
                     continue
+                # Chinese recognition is slow. Say something the moment they finish, then work out the reply.
+                if ctx.get("mode") == "intake" and said and ctx.get("lang") == "zh":
+                    await _say(ws, phrases("zh").ack)
                 if await _respond(ws, s, ctx, turns, said):
                     break
                 continue

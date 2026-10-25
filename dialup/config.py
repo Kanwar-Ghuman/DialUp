@@ -33,7 +33,7 @@ DEFAULT_VOICES = {
     ),
     "zh": Voice(
         tts_language="cmn-CN", tts_provider="Google", voice="cmn-CN-Standard-A",
-        transcription_language="zh-CN", transcription_provider="Deepgram", speech_model="nova-2-general",
+        transcription_language="cmn-Hans-CN", transcription_provider="Google", speech_model="telephony",
         menu_say_language="cmn-CN", menu_say_voice="Polly.Zhiyu",
     ),
 }

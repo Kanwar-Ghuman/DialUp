@@ -19,6 +19,8 @@ def relay(settings: Settings, lang: str, greeting: str, params: dict[str, str]) 
         "transcriptionLanguage": v.transcription_language,
         "transcriptionProvider": v.transcription_provider,
         "speechModel": v.speech_model,
+        # Report the end of a sentence 1s after the caller stops, instead of Twilio's slower auto wait.
+        "speechTimeout": "1000",
         "welcomeGreeting": greeting,
         "dtmfDetection": "true",  # keypresses arrive as {"type": "dtmf"} messages (press 1 = yes)
     }
